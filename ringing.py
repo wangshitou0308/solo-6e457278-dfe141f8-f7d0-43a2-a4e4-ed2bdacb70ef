@@ -6,7 +6,10 @@ Place-notation syntax (4-8 bells):
     x / X / -   a cross change (all adjacent pairs swap), no places made
     1..8        places made; each digit is one place, e.g. "16" or "1256"
     .           separates changes (optional around x/-); whitespace ignored
-    ,           symmetric expansion: "a,b" expands to  a + b + reverse(a)
+    ,           symmetric expansion: "a,b" -> a + reverse(a[:-1]) + b, i.e.
+                the last change of a is the half-lead pivot (mirrored, not
+                repeated) and b is the lead-end change(s); e.g. "x16x16x16,12"
+                on 6 bells gives the 12 changes of Plain Bob Minor
 
 For every change, lead/lie places that can be inferred from the stage are
 completed first (e.g. "3" on 6 bells becomes "36"); every remaining position
@@ -160,6 +163,11 @@ def _build_change(token, offset, stage):
 def parse_notation(notation, stage):
     """Parse place notation into a list of Change objects (one lead).
 
+    Syntax: 'x'/'-' = cross (all change); digits = places made; '.' separates
+    changes; a single comma mirrors the first part: 'a,b' expands to
+    a + reverse(a[:-1]) + b (the last change of a is the half-lead pivot,
+    mirrored but not repeated; b is the lead-end change appended at the end).
+
     Raises NotationError locating the original token on any invalid input.
     """
     check_stage(stage)
@@ -176,7 +184,10 @@ def parse_notation(notation, stage):
         if not part_a or not part_b:
             raise NotationError("both sides of ',' must contain at least one change",
                                 token=",", offset=cut)
-        raw = part_a + part_b + list(reversed(part_a))
+        # Symmetric expansion: the last change of part A is the half-lead
+        # pivot; mirror A without repeating the pivot, then append B (the
+        # lead-end change).  "x16x16x16,12" -> the 12 changes of PB Minor.
+        raw = part_a + list(reversed(part_a[:-1])) + part_b
     else:
         raw = _tokenize(notation, 0)
     if not raw:
@@ -231,6 +242,12 @@ def _locate(index, lead_len):
 def analyze(stage, notation, start_row=None, overrides=None, max_rows=None):
     """Expand a method lead by lead and check its truth within one extent.
 
+    The first repeated row (a premature return to the start row mid-lead
+    counts as a repeat of row 0) is recorded with both positions, but the
+    expansion keeps going so the closure period and the full trajectory are
+    always reported; it stops when the start row returns at a lead boundary
+    or when max_rows rows have been generated.
+
     overrides: list of {"lead": L, "change": K, "notation": "14"} replacing
         change K of lead L by a parsed single-change notation (a "call").
     max_rows:  safety cap on generated rows; defaults to one extent (stage!).
@@ -284,12 +301,16 @@ def analyze(stage, notation, start_row=None, overrides=None, max_rows=None):
 
     rows = [start]
     entries = [{"index": 0, "lead": 0, "change": 0, "row": row_str(start),
-                "token": None, "override": False}]
+                "token": None, "override": False, "repeat": False}]
     seen = {start: 0}
-    status = "exceeded_limit"
     first_repeat = None
     premature = None
+    closed = False
     step = 0
+    # Expand until the start row comes back at a lead boundary (closure) or
+    # the row limit is hit.  Repeats - including a premature return to the
+    # start row mid-lead - are recorded but do NOT stop the expansion, so
+    # the closure period and the full trajectory are always reported.
     while step < max_rows:
         lead = step // lead_len + 1
         pos = step % lead_len + 1
@@ -298,9 +319,17 @@ def analyze(stage, notation, start_row=None, overrides=None, max_rows=None):
         nxt = change.apply(rows[-1])
         step += 1
         rows.append(nxt)
+        closing = nxt == start and step % lead_len == 0
+        is_repeat = nxt in seen and not closing
+        if is_repeat and first_repeat is None:
+            first_repeat = {"row": row_str(nxt),
+                            "first": _locate(seen[nxt], lead_len),
+                            "second": _locate(step, lead_len)}
+        if nxt == start and not closing and premature is None:
+            premature = _locate(step, lead_len)
         entries.append({"index": step, "lead": lead, "change": pos,
                         "row": row_str(nxt), "token": change.token,
-                        "override": is_override})
+                        "override": is_override, "repeat": is_repeat})
         if is_override:
             for rep in override_reports:
                 if rep["lead"] == lead and rep["change"] == pos:
@@ -308,33 +337,31 @@ def analyze(stage, notation, start_row=None, overrides=None, max_rows=None):
                     rep["row_index"] = step
                     rep["before_row"] = row_str(rows[step - 1])
                     rep["after_row"] = row_str(nxt)
-        if nxt == start:
-            if step % lead_len == 0:
-                status = "ok"
-            else:
-                status = "premature_rounds"
-                premature = _locate(step, lead_len)
+        if closing:
+            closed = True
             break
-        if nxt in seen:
-            status = "untrue"
-            first_repeat = {"row": row_str(nxt),
-                            "first": _locate(seen[nxt], lead_len),
-                            "second": _locate(step, lead_len)}
-            break
-        seen[nxt] = step
+        if not is_repeat:
+            seen[nxt] = step
 
-    closed = status == "ok"
     lead_head = rows[lead_len] if len(rows) > lead_len else None
     hunt_bells = []
     if lead_head is not None:
         hunt_bells = [b for b in range(1, stage + 1)
                       if lead_head.index(b) == start.index(b)]
+    if not closed:
+        status = "exceeded_limit"
+    elif premature is not None:
+        status = "premature_rounds"
+    elif first_repeat is not None:
+        status = "untrue"
+    else:
+        status = "ok"
     problems = []
-    if status == "untrue":
+    if first_repeat is not None:
         problems.append("untrue")
-    elif status == "premature_rounds":
-        problems.extend(["premature_rounds", "not_closed"])
-    elif status == "exceeded_limit":
+    if premature is not None:
+        problems.append("premature_rounds")
+    if not closed:
         problems.extend(["exceeded_limit", "not_closed"])
 
     return {

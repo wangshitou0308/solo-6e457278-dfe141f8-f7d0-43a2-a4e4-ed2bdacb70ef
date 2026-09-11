@@ -34,11 +34,25 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(completed_sequence("..x..16..", 6), ["x", "16"])
 
     def test_comma_symmetric_expansion(self):
-        # a,b -> a + b + reverse(a)
+        # a,b -> a + reverse(a[:-1]) + b: the last change of a is the
+        # half-lead pivot (mirrored, not repeated); b is the lead end.
+        self.assertEqual(completed_sequence("x16x16x16,12", 6),
+                         ["x", "16", "x", "16", "x", "16",
+                          "x", "16", "x", "16", "x", "12"])
         self.assertEqual(completed_sequence("x.14,x.12", 4),
-                         ["x", "14", "x", "12", "14", "x"])
-        self.assertEqual(completed_sequence("x.16,x.12", 6),
-                         ["x", "16", "x", "12", "16", "x"])
+                         ["x", "14", "x", "x", "12"])
+        self.assertEqual(completed_sequence("x,12", 4), ["x", "12"])
+
+    def test_comma_form_of_plain_bob_minor(self):
+        # the standard abbreviation x16x16x16,12 is exactly Plain Bob Minor
+        rep = analyze(6, "x16x16x16,12")
+        self.assertEqual(rep["lead_length"], 12)
+        self.assertEqual(rep["lead_head"], "135264")
+        self.assertEqual(rep["status"], "ok")
+        self.assertEqual(rep["period_leads"], 5)
+        self.assertEqual(rep["period_rows"], 60)
+        self.assertTrue(rep["truth"]["true"])
+        self.assertEqual(rep["hunt_bells"], [1])
 
     def test_place_completion(self):
         # inferable lead/lie places are completed from the stage
@@ -148,15 +162,34 @@ class AnalyzeTests(unittest.TestCase):
         self.assertEqual(repeat["first"], {"index": 2, "lead": 1, "change": 2})
         self.assertEqual(repeat["second"], {"index": 4, "lead": 2, "change": 1})
         self.assertIn("untrue", rep["problems"])
+        # expansion continues past the first repeat to closure
+        self.assertTrue(rep["closed"])
+        self.assertEqual(rep["period_leads"], 2)
+        self.assertEqual(rep["period_rows"], 6)
+        self.assertEqual(len(rep["rows"]), 7)
+        self.assertEqual(rep["rows"][-1]["row"], "1234")
+        self.assertTrue(rep["rows"][4]["repeat"])
+        self.assertTrue(rep["rows"][5]["repeat"])
+        self.assertFalse(rep["rows"][6]["repeat"])  # the closing row itself
 
     def test_premature_rounds(self):
         rep = analyze(4, "x.x.x.x")
         self.assertEqual(rep["status"], "premature_rounds")
-        self.assertFalse(rep["closed"])
         self.assertEqual(rep["premature_rounds"],
                          {"index": 2, "lead": 1, "change": 2})
+        # premature rounds is a truth violation too: rows 0 and 2 are marked
+        self.assertFalse(rep["truth"]["true"])
+        repeat = rep["truth"]["first_repeat"]
+        self.assertEqual(repeat["row"], "1234")
+        self.assertEqual(repeat["first"], {"index": 0, "lead": 0, "change": 0})
+        self.assertEqual(repeat["second"], {"index": 2, "lead": 1, "change": 2})
+        self.assertTrue(rep["rows"][2]["repeat"])
+        # expansion continues to closure at the lead boundary
+        self.assertTrue(rep["closed"])
+        self.assertEqual(rep["period_leads"], 1)
+        self.assertEqual(rep["period_rows"], 4)
         self.assertIn("premature_rounds", rep["problems"])
-        self.assertIn("not_closed", rep["problems"])
+        self.assertIn("untrue", rep["problems"])
 
     def test_exceeded_limit_not_closed(self):
         rep = analyze(6, PB_MINOR, max_rows=10)
@@ -172,6 +205,22 @@ class AnalyzeTests(unittest.TestCase):
         self.assertEqual(rep["status"], "ok")
         self.assertEqual(rep["period_rows"], 2)
         self.assertEqual(rep["start_row"], "2143")
+
+    def test_untrue_and_never_closes(self):
+        # one bob in Plain Bob Minor: rows repeat and the course never
+        # returns to rounds within the extent
+        rep = analyze(6, PB_MINOR,
+                      overrides=[{"lead": 1, "change": 12, "notation": "14"}])
+        self.assertEqual(rep["status"], "exceeded_limit")
+        self.assertFalse(rep["closed"])
+        self.assertIsNone(rep["period_rows"])
+        repeat = rep["truth"]["first_repeat"]
+        self.assertEqual(repeat["row"], "123564")
+        self.assertEqual(repeat["first"]["index"], 12)
+        self.assertEqual(repeat["second"]["index"], 72)
+        self.assertEqual(rep["problems"],
+                         ["untrue", "exceeded_limit", "not_closed"])
+        self.assertEqual(rep["rows_generated"], 720)  # one full extent
 
     def test_override_keeps_surrounding_trajectory(self):
         rep = analyze(6, PB_MINOR,
@@ -263,11 +312,12 @@ class ApiTests(unittest.TestCase):
 
     def test_02_parse_endpoint(self):
         status, out = self.call("POST", "/api/parse",
-                                {"stage": 6, "notation": "x.16,x.12"})
+                                {"stage": 6, "notation": "x16x16x16,12"})
         self.assertEqual(status, 200)
-        self.assertEqual(out["lead_length"], 6)
+        self.assertEqual(out["lead_length"], 12)
         self.assertEqual([c["completed"] for c in out["changes"]],
-                         ["x", "16", "x", "12", "16", "x"])
+                         ["x", "16", "x", "16", "x", "16",
+                          "x", "16", "x", "16", "x", "12"])
 
     def test_03_parse_error_located(self):
         status, out = self.call("POST", "/api/parse",

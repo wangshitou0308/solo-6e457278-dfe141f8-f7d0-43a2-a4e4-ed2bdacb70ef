@@ -15,8 +15,8 @@ import urllib.request
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8000"
 
 PB_MINOR = "x.16.x.16.x.16.x.16.x.16.x.12"          # 12 lead end (plain)
+PB_MINOR_COMMA = "x16x16x16,12"                     # same lead, abbreviated
 PB_MINOR_14 = "x.16.x.16.x.16.x.16.x.16.x.14"       # 14 at every lead end
-CAMBRIDGE_LIKE = "x.36.x.14.x.1256.x.36.x.14.x.56,x.12"  # comma expansion demo
 
 
 def call(method, path, body=None):
@@ -39,9 +39,10 @@ def show(title, obj, keys=None):
 def main():
     print(f"API base: {BASE}")
 
-    # 1. parse only (no storage): comma symmetric expansion
-    parsed = call("POST", "/api/parse", {"stage": 6, "notation": CAMBRIDGE_LIKE})
-    show("parse: Cambridge-like lead via comma expansion",
+    # 1. parse only (no storage): the standard comma abbreviation expands
+    #    to the 12 changes of Plain Bob Minor
+    parsed = call("POST", "/api/parse", {"stage": 6, "notation": PB_MINOR_COMMA})
+    show("parse: 'x16x16x16,12' (comma symmetric expansion)",
          parsed, ["lead_length"])
     print("changes:", " ".join(c["completed"] for c in parsed["changes"]))
 

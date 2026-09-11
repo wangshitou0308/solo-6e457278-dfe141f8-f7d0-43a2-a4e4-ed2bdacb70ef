@@ -47,8 +47,9 @@ h1,h2{border-bottom:1px solid #ddd;padding-bottom:.25em}
 <tr><td><code>x</code> / <code>X</code> / <code>-</code></td><td>全换（cross）：所有相邻位置交换，无 place</td></tr>
 <tr><td><code>1</code>…<code>8</code></td><td>place：该位置的钟不动，如 <code>16</code>、<code>1256</code></td></tr>
 <tr><td><code>.</code></td><td>分隔各个 change（<code>x</code>/<code>-</code> 前后可省略）；空白字符忽略</td></tr>
-<tr><td><code>,</code></td><td>对称展开：<code>a,b</code> → <code>a + b + reverse(a)</code>，如
-<code>x.14,x.12</code> → <code>x.14.x.12.x.14</code>（至多一个逗号）</td></tr>
+<tr><td><code>,</code></td><td>对称展开：<code>a,b</code> → <code>a + reverse(a[:-1]) + b</code>（a 的最后一个
+change 是 half-lead 支点，镜像不重复；b 是 lead end）。如 <code>x16x16x16,12</code> →
+<code>x.16.x.16.x.16.x.16.x.16.x.12</code>（12 变，即 Plain Bob Minor）；至多一个逗号</td></tr>
 </table>
 <p>解析规则：先按钟数补全可推断的首尾 place（如 6 口钟上 <code>3</code> → <code>36</code>、
 <code>2</code> → <code>12</code>）；其余位置必须组成相邻交换对。非法字符、place 越界、
@@ -57,8 +58,11 @@ h1,h2{border-bottom:1px solid #ddd;padding-bottom:.25em}
 <h2>分析语义</h2>
 <ul>
 <li>展开 rows：给出 lead 长度、lead head（结束排列）、回到起始排列（rounds）的周期（leads/rows）、hunt bells（lead head 中位置未变的钟）。</li>
-<li>truth 仅在一个 extent（stage! 行）内按 row 唯一性检查；首个重复 row 标出两处位置（index/lead/change）。</li>
-<li>未在 lead 边界回到 rounds → <code>premature_rounds</code>；达到上限仍未闭合 → <code>exceeded_limit</code> + <code>not_closed</code>；重复 → <code>untrue</code>，分别报告。</li>
+<li>truth 仅在一个 extent（stage! 行）内按 row 唯一性检查；首个重复 row 标出两处位置（index/lead/change），
+逐行条目以 <code>repeat</code> 标记；发现重复后仍继续展开，直到闭合或达到上限。</li>
+<li>lead 中途回到 rounds → <code>premature_rounds</code>，同时视为对第 0 行的重复（标出 0 与该行）；
+达到上限仍未闭合 → <code>exceeded_limit</code> + <code>not_closed</code>；有重复 → <code>untrue</code>，分别报告。
+闭合（lead 边界回到起始排列）时的周期 leads/rows 总会给出。</li>
 <li>组合（composition）：分析时可用 <code>overrides</code> 在指定 lead 的某一变以 notation 覆盖（如 bob/single），报告保留覆盖点前后轨迹。</li>
 </ul>
 

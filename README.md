@@ -7,14 +7,17 @@ Python 3.8+ 即可运行。
 ## 功能
 
 - **Place notation 解析**：支持 `x`/`X`/`-`（全换）、位置数字（`1`…`8`）、`.` 分隔、
-  `,` 逗号对称展开（`a,b` → `a + b + reverse(a)`）；支持 4–8 口钟与自定义起始排列。
+  `,` 逗号对称展开（`a,b` → `a + reverse(a[:-1]) + b`，如 `x16x16x16,12` 即
+  Plain Bob Minor 的 12 变）；支持 4–8 口钟与自定义起始排列。
 - **严格校验**：先按钟数补全可推断的首尾 place（如 6 口钟 `3` → `36`、`2` → `12`），
   其余位置必须组成相邻交换对。非法字符、place 越界、同一 change 内 place 重复、
   无法配对——都会**定位到原记号**（`token` + `offset`）报错，绝不自动修正。
 - **Rows 展开**：lead 长度、lead head（结束排列）、回到 rounds 的周期（leads/rows）、
   hunt bells（lead head 中位置未变的钟）。
 - **Truth 检查**：仅在一个 extent（`stage!` 行）内按 row 唯一性检查；首个重复 row
-  标出两处位置（index/lead/change）。`premature_rounds`（lead 中途回到 rounds）、
+  标出两处位置（index/lead/change），逐行条目以 `repeat` 标记；**发现重复后仍继续
+  展开**，直到在 lead 边界回到起始排列（闭合）或达到上限，闭合周期与完整轨迹总会给出。
+  `premature_rounds`（lead 中途回到 rounds，视为对第 0 行的重复）、
   `exceeded_limit`（超过上限未闭合）、`untrue`（有重复）分别报告。
 - **组合（composition）**：分析时可用 `overrides` 在指定 lead 的某一变以 notation
   覆盖（如 bob/single），报告保留覆盖点前后轨迹（`before_row`/`after_row`）。
@@ -42,7 +45,7 @@ python3 examples.py    # 端到端演示（需先启动 server）
 | `x` / `X` / `-` | 全换（cross）：所有相邻位置交换，无 place |
 | `1`…`8` | place：该位置的钟不动，如 `16`、`1256`；不得超出钟数 |
 | `.` | 分隔 change（`x`/`-` 前后可省略）；空白忽略 |
-| `,` | 对称展开：`a,b` → `a + b + reverse(a)`，至多一个逗号 |
+| `,` | 对称展开：`a,b` → `a + reverse(a[:-1]) + b`（a 的最后一个 change 为 half-lead 支点，镜像不重复；b 为 lead end），至多一个逗号 |
 
 解析规则：
 
@@ -118,15 +121,17 @@ curl -s -X POST localhost:8000/api/analyses -d '{
   "premature_rounds": null,
   "problems": [],
   "rows": [{"index": 0, "lead": 0, "change": 0, "row": "123456",
-            "token": null, "override": false}, ...]
+            "token": null, "override": false, "repeat": false}, ...]
 }
 ```
 
 - `untrue`：`truth.first_repeat` 给出重复 row 及两处位置
-  （`{"index","lead","change"}`）。
-- `premature_rounds`：在 lead 中途回到起始排列，给出位置。
+  （`{"index","lead","change"}`）；展开不中断，闭合时 `period_leads`/`period_rows`
+  照常给出。
+- `premature_rounds`：在 lead 中途回到起始排列，给出位置；同时计入
+  `truth.first_repeat`（第 0 行与该行），`truth.true` 为 `false`。
 - `exceeded_limit`：达到 `max_rows`（默认一个 extent = `stage!`）仍未闭合，
-  `problems` 含 `not_closed`。
+  `problems` 含 `not_closed`；此前的重复仍会记录在 `truth.first_repeat`。
 
 ### 比较两版
 
