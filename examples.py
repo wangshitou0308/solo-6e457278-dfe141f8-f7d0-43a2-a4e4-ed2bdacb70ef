@@ -5,7 +5,8 @@ Start the server first:   python3 server.py --port 8000
 Then run:                 python3 examples.py [base_url]
 
 Creates method versions, runs analyses (including a bob override), compares
-two versions and downloads a report as JSON.
+two versions, composes a spliced touch across methods and downloads reports
+as JSON.
 """
 
 import json
@@ -98,6 +99,63 @@ def main():
     with open(fname, "wb") as fh:
         fh.write(payload)
     print(f"\ndownloaded report -> {fname} ({len(payload)} bytes)")
+
+    # 9. spliced touch: 2 leads of v1 -> 2 leads of v2 (with a bob in the
+    #    segment) -> 1 lead of v1; each segment continues from the previous
+    #    segment's last row, switches happen only at lead boundaries
+    t1 = call("POST", "/api/touches", {"segments": [
+        {"method_id": m1["id"], "leads": 2},
+        {"method_id": m2["id"], "leads": 2,
+         "overrides": [{"lead": 1, "change": 12, "notation": "12"}]},
+        {"method_id": m1["id"], "leads": 1}]})
+    show("spliced touch: PB Minor -> PB Minor (14 lead end) -> PB Minor",
+         t1, ["id", "status", "closed", "total_rows", "total_leads",
+              "segment_count", "problems", "methods_used"])
+
+    # 10. switch points and per-segment rows
+    full = call("GET", f"/api/touches/{t1['id']}")
+    print("\n=== switch points (before/after rows) ===")
+    for sw in full["report"]["switches"]:
+        print(f"  row {sw['at_index']:>2}: segment {sw['from_segment']} "
+              f"({sw['from_method']} v{sw['from_version']}) -> "
+              f"segment {sw['to_segment']} ({sw['to_method']} v{sw['to_version']})"
+              f"  {sw['before_row']} -> {sw['after_row']}")
+    rows = call("GET", f"/api/touches/{t1['id']}/rows?segment=2&from=25&to=30")
+    print("\n=== segment 2, rows 25-30 (override source marked) ===")
+    for r in rows["rows"]:
+        src = f"  override {r['override']['notation']}" if r["override"] else ""
+        print(f"  row {r['index']:>2}  seg {r['segment']}  "
+              f"{r['method']} v{r['version']}  lead {r['lead']}  "
+              f"change {r['change']:>2}  {r['row']}  {r['token']}{src}")
+
+    # 11. a second touch (plain course as one segment) and compare
+    t2 = call("POST", "/api/touches",
+              {"segments": [{"method_id": m1["id"], "leads": 5}]})
+    cmp = call("GET", f"/api/touches/compare?a={t1['id']}&b={t2['id']}")
+    show("compare spliced touch vs plain-course touch", cmp["comparison"],
+         ["same_stage", "total_rows_equal", "both_closed", "both_true",
+          "methods_overlap"])
+
+    # 12. validation errors are located to the segment and nothing is stored
+    gd = call("POST", "/api/methods",
+              {"name": "Grandsire Doubles", "stage": 5,
+               "notation": "3.1.5.1.5.1.5.1.5.125"})
+    try:
+        call("POST", "/api/touches", {"segments": [
+            {"method_id": m1["id"], "leads": 1},
+            {"method_id": gd["id"], "leads": 1}]})   # 5 bells vs 6
+    except urllib.error.HTTPError as e:
+        show("stage mismatch reported against segment 2",
+             json.loads(e.read().decode()))
+
+    # 13. download the touch report as JSON
+    req = urllib.request.Request(BASE + f"/api/touches/{t1['id']}/download")
+    with urllib.request.urlopen(req) as resp:
+        payload = resp.read()
+        fname = resp.headers["Content-Disposition"].split("filename=")[-1].strip('"')
+    with open(fname, "wb") as fh:
+        fh.write(payload)
+    print(f"\ndownloaded touch report -> {fname} ({len(payload)} bytes)")
 
 
 if __name__ == "__main__":

@@ -16,7 +16,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 from db import Store
-from ringing import (HARD_MAX_ROWS, NotationError, analyze, compare_reports,
+from ringing import (HARD_MAX_ROWS, NotationError, SplicedError, analyze,
+                     analyze_spliced, compare_reports, compare_touch_reports,
                      parse_notation, parse_row, row_str)
 
 DOCS_HTML = """<!doctype html>
@@ -66,6 +67,23 @@ change 是 half-lead 支点，镜像不重复；b 是 lead end）。如 <code>x1
 <li>组合（composition）：分析时可用 <code>overrides</code> 在指定 lead 的某一变以 notation 覆盖（如 bob/single），报告保留覆盖点前后轨迹。</li>
 </ul>
 
+<h2>Spliced touch（多方法拼接）</h2>
+<ul>
+<li>按区段（segment）编排：每段指定 <code>method_id</code>、lead 数（<code>leads</code>）与段内
+change 覆盖（<code>overrides</code>，lead 从 1 起按段内计）。所有方法钟数必须一致；
+切换只发生在 lead 边界，下一段<strong>接着上一段末行</strong>展开，不会重置为各方法的 start_row。</li>
+<li>校验按区段报错且不落库：方法不存在（404）、钟数不一、leads 非法、覆盖越界
+（lead 超出段内 lead 数或 change 超出 lead 长度）、累计总行数超过上限
+（默认一个 extent = stage!）。错误体带 <code>segment</code>（及 <code>override</code>）定位。</li>
+<li>整段 touch 统一判定 truth：重复 row、提前回到起始排列（premature_rounds）、
+结尾是否回到起始排列（closed）、row 上限——绝不用各方法单独的 truth 代替跨区段结论。</li>
+<li>逐行条目标明区段、方法版本（method_id/name/version）、lead、change 与覆盖来源
+（<code>override</code> 为 null 或 <code>{"segment","lead","change","notation","replaces_token"}</code>）。</li>
+<li>报告汇总：各方法使用的 leads/rows（<code>methods_used</code>）、切换点前后 row
+（<code>switches</code>）、首次重复的两处位置（<code>truth.first_repeat</code>，含 segment）、
+未应用覆盖（<code>unapplied_overrides</code>，如同一 change 被后续覆盖取代）。</li>
+</ul>
+
 <h2>接口一览</h2>
 <table>
 <tr><th>方法</th><th>路径</th><th>说明</th></tr>
@@ -79,6 +97,12 @@ change 是 half-lead 支点，镜像不重复；b 是 lead end）。如 <code>x1
 <tr><td class="tag get">GET</td><td><code>/api/analyses/{id}/rows?from=0&amp;to=60</code></td><td>逐行结果（可切片）</td></tr>
 <tr><td class="tag get">GET</td><td><code>/api/analyses/{id}/download</code></td><td>下载报告 JSON（attachment）</td></tr>
 <tr><td class="tag get">GET</td><td><code>/api/compare?a=1&amp;b=2</code></td><td>比较两个分析的周期与重复位置；也支持 POST <code>{"a":1,"b":2}</code> 或 <code>{"method_a":1,"method_b":2}</code>（自动建分析）</td></tr>
+<tr><td class="tag post">POST</td><td><code>/api/touches</code></td><td>创建 spliced touch。Body: <code>{"segments":[{"method_id":1,"leads":2,"overrides":[{"lead":1,"change":12,"notation":"14"}]?},{"method_id":2,"leads":3}],"start_row":"123456"?,"max_rows":720?}</code></td></tr>
+<tr><td class="tag get">GET</td><td><code>/api/touches</code></td><td>列出全部 touch（摘要）</td></tr>
+<tr><td class="tag get">GET</td><td><code>/api/touches/{id}</code></td><td>完整 touch 报告（含逐行 rows）</td></tr>
+<tr><td class="tag get">GET</td><td><code>/api/touches/{id}/rows?segment=2&amp;from=0&amp;to=60</code></td><td>逐行结果，可按区段过滤、按行号切片</td></tr>
+<tr><td class="tag get">GET</td><td><code>/api/touches/{id}/download</code></td><td>下载 touch 报告 JSON（attachment）</td></tr>
+<tr><td class="tag get">GET</td><td><code>/api/touches/compare?a=1&amp;b=2</code></td><td>比较两次 touch 的规模、闭合、truth 与首次重复位置；也支持 POST <code>{"a":1,"b":2}</code></td></tr>
 </table>
 
 <h2>示例</h2>
@@ -96,6 +120,30 @@ curl -s 'localhost:8000/api/analyses/1/rows?from=0&amp;to=12'
 # 比较两版并下载报告
 curl -s 'localhost:8000/api/compare?a=1&amp;b=2'
 curl -sOJ localhost:8000/api/analyses/1/download</pre>
+
+<h2>示例：spliced touch</h2>
+<pre># 三段拼接：2 leads 方法1 → 2 leads 方法2（段内 bob 覆盖）→ 1 lead 方法1
+curl -s -X POST localhost:8000/api/touches -d '{
+  "segments": [
+    {"method_id": 1, "leads": 2},
+    {"method_id": 2, "leads": 2,
+     "overrides": [{"lead": 1, "change": 12, "notation": "14"}]},
+    {"method_id": 1, "leads": 1}
+  ]}'
+
+# 按区段读取逐行结果（第 2 段）
+curl -s 'localhost:8000/api/touches/1/rows?segment=2'
+
+# 比较两次 touch / 下载报告
+curl -s 'localhost:8000/api/touches/compare?a=1&amp;b=2'
+curl -sOJ localhost:8000/api/touches/1/download</pre>
+<p>校验错误按区段定位（<code>segment</code> 为 1 起的区段序号），且不落库：</p>
+<pre>{"error": "segment 2: method 99 not found", "code": "not_found",
+ "segment": 2, "method_id": 99}
+{"error": "stage mismatch: segment has 5 bells, the touch is on 6",
+ "code": "bad_segment", "segment": 2, "stage": 5, "expected": 6}
+{"error": "total rows 84 exceed the limit of 60", "code": "bad_segment",
+ "segment": 3, "total_rows": 84, "max_rows": 60}</pre>
 <p>更多说明见仓库 <code>README.md</code>；演示脚本：<code>python3 examples.py</code>。</p>
 </body>
 </html>
@@ -116,6 +164,12 @@ API_INDEX = {
         "GET  /api/analyses/{id}/rows?from=&to=",
         "GET  /api/analyses/{id}/download",
         "GET  /api/compare?a=&b=  (or POST)",
+        "POST /api/touches",
+        "GET  /api/touches",
+        "GET  /api/touches/{id}",
+        "GET  /api/touches/{id}/rows?segment=&from=&to=",
+        "GET  /api/touches/{id}/download",
+        "GET  /api/touches/compare?a=&b=  (or POST)",
     ],
 }
 
@@ -168,6 +222,23 @@ def _get_analysis_or_404(store, analysis_id):
     if rec is None:
         raise ApiError(404, f"analysis {analysis_id} not found", "not_found")
     return rec
+
+
+def _get_touch_or_404(store, touch_id):
+    rec = store.get_touch(touch_id)
+    if rec is None:
+        raise ApiError(404, f"touch {touch_id} not found", "not_found")
+    return rec
+
+
+def _touch_summary(rec):
+    rep = rec["report"]
+    keys = ("status", "closed", "stage", "total_rows", "total_leads",
+            "segment_count", "problems")
+    out = {k: rep[k] for k in keys}
+    out.update({"id": rec["id"], "created_at": rec["created_at"],
+                "truth": rep["truth"], "methods_used": rep["methods_used"]})
+    return out
 
 
 def _run_analysis(store, method_id, overrides=None, max_rows=None):
@@ -327,6 +398,148 @@ def api_compare(handler, query, body):
     return {"a": _side(rec_a), "b": _side(rec_b), "comparison": comparison}, 200
 
 
+def api_create_touch(handler, query, body):
+    """Create a spliced touch: segments of method versions run back to back.
+
+    Every segment is validated (method exists, same stage, leads >= 1,
+    overrides inside the segment, cumulative rows within the limit) and any
+    failure is reported against its 1-based segment index; nothing is stored
+    unless the whole touch expands successfully.
+    """
+    store = handler.server.store
+    segments = _require(body, "segments")
+    if not isinstance(segments, list) or not segments:
+        raise ApiError(400, "segments must be a non-empty list", "bad_field")
+    max_rows = body.get("max_rows")
+    if max_rows is not None:
+        if isinstance(max_rows, bool) or not isinstance(max_rows, int) \
+                or not 1 <= max_rows <= HARD_MAX_ROWS:
+            raise ApiError(400, f"max_rows must be an integer in 1..{HARD_MAX_ROWS}",
+                           "bad_field")
+    resolved = []
+    for i, spec in enumerate(segments, start=1):
+        if not isinstance(spec, dict):
+            raise ApiError(400, f"segment {i} must be an object", "bad_segment",
+                           {"segment": i})
+        method_id = spec.get("method_id")
+        if isinstance(method_id, bool) or not isinstance(method_id, int):
+            raise ApiError(400, f"segment {i}: method_id must be an integer",
+                           "bad_segment", {"segment": i})
+        method = store.get_method(method_id)
+        if method is None:
+            raise ApiError(404, f"segment {i}: method {method_id} not found",
+                           "not_found", {"segment": i, "method_id": method_id})
+        overrides = spec.get("overrides") or []
+        if not isinstance(overrides, list):
+            raise ApiError(400, f"segment {i}: overrides must be a list",
+                           "bad_segment", {"segment": i})
+        resolved.append({"method_id": method["id"], "name": method["name"],
+                         "version": method["version"], "stage": method["stage"],
+                         "notation": method["notation"],
+                         "leads": spec.get("leads"), "overrides": overrides})
+    try:
+        report = analyze_spliced(resolved, start_row=body.get("start_row"),
+                                 max_rows=max_rows)
+    except SplicedError as err:
+        extra = {k: v for k, v in err.to_dict().items() if k != "error"}
+        raise ApiError(400, err.message, "bad_segment", extra)
+    rec = store.create_touch(report["stage"], segments, report["max_rows"],
+                             report["status"], report)
+    out = _touch_summary(rec)
+    out["links"] = {
+        "report": f"/api/touches/{rec['id']}",
+        "rows": f"/api/touches/{rec['id']}/rows",
+        "download": f"/api/touches/{rec['id']}/download",
+    }
+    return out, 201
+
+
+def api_list_touches(handler, query, body):
+    store = handler.server.store
+    return {"touches": [_touch_summary(r) for r in store.list_touches()]}, 200
+
+
+def api_get_touch(handler, query, body, touch_id):
+    store = handler.server.store
+    rec = _get_touch_or_404(store, touch_id)
+    return {"id": rec["id"], "created_at": rec["created_at"],
+            "stage": rec["stage"], "segments": rec["segments"],
+            "max_rows": rec["max_rows"], "status": rec["status"],
+            "report": rec["report"]}, 200
+
+
+def api_touch_rows(handler, query, body, touch_id):
+    store = handler.server.store
+    rec = _get_touch_or_404(store, touch_id)
+    report = rec["report"]
+    rows = report["rows"]
+    segment = None
+    if "segment" in query:
+        try:
+            segment = int(query["segment"][0])
+        except ValueError:
+            raise ApiError(400, "segment must be an integer", "bad_field")
+        if not 0 <= segment <= report["segment_count"]:
+            raise ApiError(404, f"touch {touch_id} has no segment {segment}",
+                           "not_found",
+                           {"segment": segment,
+                            "segment_count": report["segment_count"]})
+        rows = [r for r in rows if r["segment"] == segment]
+
+    def _int_param(name, default):
+        if name not in query:
+            return default
+        try:
+            return int(query[name][0])
+        except ValueError:
+            raise ApiError(400, f"{name} must be an integer", "bad_field")
+
+    start = max(0, _int_param("from", 0))
+    end = _int_param("to", rows[-1]["index"] if rows else 0)  # inclusive
+    sliced = [r for r in rows if start <= r["index"] <= end]
+    return {"id": rec["id"], "segment": segment,
+            "total": len(report["rows"]), "matched": len(rows),
+            "from": start, "to": min(end, rows[-1]["index"] if rows else 0),
+            "rows": sliced}, 200
+
+
+def api_touch_download(handler, query, body, touch_id):
+    store = handler.server.store
+    rec = _get_touch_or_404(store, touch_id)
+    payload = {"id": rec["id"], "created_at": rec["created_at"],
+               "stage": rec["stage"], "segments": rec["segments"],
+               "report": rec["report"]}
+    return payload, 200, f"touch-{rec['id']}.json"
+
+
+def api_compare_touches(handler, query, body):
+    store = handler.server.store
+
+    def _param(name):
+        for src in (body, query):
+            if isinstance(src, dict) and name in src:
+                value = src[name]
+                return value[0] if isinstance(value, list) else value
+        return None
+
+    a, b = _param("a"), _param("b")
+    if a is None or b is None:
+        raise ApiError(400, "provide touch ids a & b", "missing_field")
+    try:
+        rec_a = _get_touch_or_404(store, int(a))
+        rec_b = _get_touch_or_404(store, int(b))
+    except ValueError:
+        raise ApiError(400, "ids must be integers", "bad_field")
+
+    def _side(rec):
+        return {"touch_id": rec["id"], "created_at": rec["created_at"],
+                "methods_used": rec["report"]["methods_used"]}
+
+    comparison = compare_touch_reports(rec_a["report"], rec_b["report"])
+    return {"a": _side(rec_a), "b": _side(rec_b),
+            "comparison": comparison}, 200
+
+
 ROUTES = [
     ("GET", re.compile(r"^/$"), lambda h, q, b: (DOCS_HTML, 200, None, "html")),
     ("GET", re.compile(r"^/api$"), lambda h, q, b: (API_INDEX, 200)),
@@ -345,6 +558,16 @@ ROUTES = [
      lambda h, q, b, aid: api_download(h, q, b, int(aid))),
     ("GET", re.compile(r"^/api/compare$"), api_compare),
     ("POST", re.compile(r"^/api/compare$"), api_compare),
+    ("POST", re.compile(r"^/api/touches$"), api_create_touch),
+    ("GET", re.compile(r"^/api/touches$"), api_list_touches),
+    ("GET", re.compile(r"^/api/touches/compare$"), api_compare_touches),
+    ("POST", re.compile(r"^/api/touches/compare$"), api_compare_touches),
+    ("GET", re.compile(r"^/api/touches/(\d+)$"),
+     lambda h, q, b, tid: api_get_touch(h, q, b, int(tid))),
+    ("GET", re.compile(r"^/api/touches/(\d+)/rows$"),
+     lambda h, q, b, tid: api_touch_rows(h, q, b, int(tid))),
+    ("GET", re.compile(r"^/api/touches/(\d+)/download$"),
+     lambda h, q, b, tid: api_touch_download(h, q, b, int(tid))),
 ]
 
 

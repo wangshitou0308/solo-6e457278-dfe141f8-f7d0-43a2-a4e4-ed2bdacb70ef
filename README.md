@@ -21,8 +21,14 @@ Python 3.8+ 即可运行。
   `exceeded_limit`（超过上限未闭合）、`untrue`（有重复）分别报告。
 - **组合（composition）**：分析时可用 `overrides` 在指定 lead 的某一变以 notation
   覆盖（如 bob/single），报告保留覆盖点前后轨迹（`before_row`/`after_row`）。
-- **持久化**：SQLite 保存方法版本（同名自动递增 version）与全部分析报告。
-- **比较与下载**：比较两版的周期与重复位置；报告可下载为 JSON。
+- **Spliced touch（多方法拼接）**：按区段编排 touch——每段指定 `method_id`、lead 数
+  与段内 change 覆盖；各方法钟数必须一致，切换只发生在 lead 边界，下一段接着上一段
+  末行展开（不重置为各方法的 start_row）。truth 对整段 touch 统一判定（重复 row、
+  提前回到起始排列、结尾闭合、row 上限），逐行标明区段/方法版本/lead/change/覆盖来源；
+  报告汇总各方法使用的 leads/rows、切换点前后 row、首次重复两处位置与未应用覆盖。
+  方法不存在、钟数不一、覆盖越界或总行数超限时按区段报错且不落库。
+- **持久化**：SQLite 保存方法版本（同名自动递增 version）、全部分析报告与 spliced touch。
+- **比较与下载**：比较两版的周期与重复位置、比较两次 touch；报告均可下载为 JSON。
 
 ## 运行
 
@@ -34,7 +40,7 @@ python3 server.py --host 127.0.0.1 --port 8000 --db ringing.db
 测试与演示：
 
 ```bash
-python3 tests.py       # 29 个单元/接口测试
+python3 tests.py       # 44 个单元/接口测试
 python3 examples.py    # 端到端演示（需先启动 server）
 ```
 
@@ -77,6 +83,12 @@ python3 examples.py    # 端到端演示（需先启动 server）
 | GET | `/api/analyses/{id}/rows?from=0&to=60` | 逐行结果（`to` 为含端点的行号） |
 | GET | `/api/analyses/{id}/download` | 下载报告 JSON（attachment） |
 | GET/POST | `/api/compare` | 比较两版：`?a=1&b=2`（分析 id）或 `{"method_a":1,"method_b":2}`（自动建分析） |
+| POST | `/api/touches` | 创建 spliced touch：`{"segments":[{"method_id":1,"leads":2,"overrides"?},...],"start_row"?,"max_rows"?}` |
+| GET | `/api/touches` | 列出全部 touch（摘要） |
+| GET | `/api/touches/{id}` | 完整 touch 报告（含逐行 rows） |
+| GET | `/api/touches/{id}/rows?segment=2&from=0&to=60` | 逐行结果：`segment` 按区段过滤，`from`/`to` 按行号切片 |
+| GET | `/api/touches/{id}/download` | 下载 touch 报告 JSON（attachment） |
+| GET/POST | `/api/touches/compare` | 比较两次 touch：`?a=1&b=2`（touch id） |
 
 ### 创建方法版本
 
@@ -150,21 +162,97 @@ curl -s 'localhost:8000/api/compare?a=1&b=2'
    "b": {"period_rows": 36, "hunt_bells": [1, 2, 3], ...}}}
 ```
 
+### Spliced touch（多方法拼接）
+
+把多个方法版本按区段（segment）拼成一段 touch：
+
+```bash
+curl -s -X POST localhost:8000/api/touches -d '{
+  "segments": [
+    {"method_id": 1, "leads": 2},
+    {"method_id": 2, "leads": 2,
+     "overrides": [{"lead": 1, "change": 12, "notation": "14"}]},
+    {"method_id": 1, "leads": 1}
+  ]}'
+```
+
+语义：
+
+- 每段指定 `method_id`、lead 数（`leads` ≥ 1）与段内 change 覆盖
+  （`overrides` 的 `lead` 从 1 起按**段内**计，`change` 按 lead 内位置计）。
+- 所有方法的钟数必须一致（以第 1 段为准）；切换只发生在 lead 边界；
+  下一段**接着上一段末行**展开，不会重置为各方法的 `start_row`
+  （touch 整体只有一个起始排列 `start_row`，缺省 rounds）。
+- truth 对**整段 touch** 统一判定：重复 row、提前回到起始排列
+  （`premature_rounds`）、结尾是否回到起始排列（`closed`）与 row 上限，
+  绝不用各方法单独的 truth 代替跨区段结论。
+- 总行数上限 `max_rows` 缺省为一个 extent（`stage!`）；累计行数超限即报错。
+
+校验错误按区段定位（`segment` 为 1 起的区段序号），且**不落库**：
+
+```json
+{"error": "segment 2: method 99 not found", "code": "not_found",
+ "segment": 2, "method_id": 99}
+{"error": "stage mismatch: segment has 5 bells, the touch is on 6",
+ "code": "bad_segment", "segment": 2, "stage": 5, "expected": 6}
+{"error": "override change must be between 1 and 12 (the lead length)",
+ "code": "bad_segment", "segment": 1, "override": 0, "change": 99, "lead_length": 12}
+{"error": "total rows 732 exceed the limit of 720",
+ "code": "bad_segment", "segment": 1, "total_rows": 732, "max_rows": 720}
+```
+
+touch 报告要点：
+
+```json
+{
+  "status": "not_closed",          // ok | untrue | premature_rounds | not_closed
+  "closed": false,
+  "total_rows": 60, "total_leads": 5, "segment_count": 3,
+  "truth": {"true": true, "first_repeat": null},
+  "premature_rounds": null,
+  "switches": [{"at_index": 24, "from_segment": 1, "to_segment": 2,
+                "from_method": "Plain Bob Minor", "to_method": "...",
+                "before_row": "156342", "after_row": "513624"}],
+  "methods_used": [{"method_id": 1, "name": "Plain Bob Minor", "version": 1,
+                    "leads": 3, "rows": 36, "segments": [1, 3]}, ...],
+  "segments": [{"index": 1, "method_id": 1, "leads": 2, "lead_length": 12,
+                "rows": 24, "from_index": 0, "to_index": 24,
+                "start_row": "123456", "end_row": "156342",
+                "overrides": [...]}, ...],
+  "unapplied_overrides": [],
+  "rows": [{"index": 25, "segment": 2, "method_id": 2, "method": "...",
+            "version": 1, "lead": 1, "change": 1, "row": "513624",
+            "token": "x", "override": null, "repeat": false}, ...]
+}
+```
+
+- 逐行条目标明区段、方法版本（`method_id`/`method`/`version`）、`lead`、`change`
+  与覆盖来源（`override` 为 `null` 或
+  `{"segment","lead","change","notation","replaces_token"}`）。
+- `truth.first_repeat` 的两处位置均含 `segment`/`lead`/`change`/`index`。
+- 同一 change 被多个覆盖指定时后者生效，前者进入 `unapplied_overrides`
+  （`reason: "superseded by a later override for the same change"`）。
+- `GET /api/touches/{id}/rows?segment=2` 只取第 2 段的逐行结果；
+  `GET /api/touches/compare?a=1&b=2` 比较两次 touch 的规模、闭合、truth、
+  首次重复位置与方法交集（`methods_overlap`）。
+
 ## 存储
 
-SQLite（默认 `ringing.db`）两张表：
+SQLite（默认 `ringing.db`）三张表：
 
 - `methods`：每个方法版本一行（`name`+`version` 唯一），保存 stage、notation、
   start_row、创建时间。
 - `analyses`：每次分析一行，保存所属方法版本、overrides、max_rows、状态与
   完整报告 JSON。
+- `touches`：每次 spliced touch 一行，保存 stage、区段编排（segments 请求原文）、
+  max_rows、状态与完整报告 JSON。
 
 ## 文件
 
 | 文件 | 说明 |
 |---|---|
-| `ringing.py` | 核心引擎：记号解析、rows 展开、truth 检查、比较 |
-| `db.py` | SQLite 持久化（方法版本 + 报告） |
+| `ringing.py` | 核心引擎：记号解析、rows 展开、truth 检查、spliced touch、比较 |
+| `db.py` | SQLite 持久化（方法版本 + 分析报告 + touch 报告） |
 | `server.py` | HTTP API（`http.server`）与文档页 |
-| `tests.py` | 单元测试 + 接口测试（29 个） |
+| `tests.py` | 单元测试 + 接口测试（44 个） |
 | `examples.py` | 端到端演示客户端 |

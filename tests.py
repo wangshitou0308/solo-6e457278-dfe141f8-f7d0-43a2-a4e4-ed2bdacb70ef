@@ -11,12 +11,22 @@ import urllib.error
 import urllib.request
 
 from db import Store
-from ringing import (NotationError, analyze, compare_reports, parse_notation,
+from ringing import (NotationError, SplicedError, analyze, analyze_spliced,
+                     compare_reports, compare_touch_reports, parse_notation,
                      parse_row, row_str)
 from server import make_server
 
 # Plain Bob Minor: 12-change lead, lead head 135264, 5 leads = 60 rows, true.
 PB_MINOR = "x.16.x.16.x.16.x.16.x.16.x.12"
+# 14 at every lead end: 3 leads = 36 rows, lead head 123564, true.
+PB_MINOR_14 = "x.16.x.16.x.16.x.16.x.16.x.14"
+
+
+def _seg(method_id, notation, leads, stage=6, name=None, version=1,
+         overrides=None):
+    return {"method_id": method_id, "name": name or f"M{method_id}",
+            "version": version, "stage": stage, "notation": notation,
+            "leads": leads, "overrides": overrides or []}
 
 
 def completed_sequence(notation, stage):
@@ -271,6 +281,189 @@ class AnalyzeTests(unittest.TestCase):
         self.assertIn("first_repeat_same_position", cmp)
 
 
+class SplicedTests(unittest.TestCase):
+    def test_continuation_matches_plain_course(self):
+        # PB Minor 2 leads + 3 leads: the second segment continues from the
+        # first segment's last row (never resets to the method start_row),
+        # so the splice is exactly the plain course.
+        rep = analyze_spliced([_seg(1, PB_MINOR, 2), _seg(1, PB_MINOR, 3)])
+        plain = analyze(6, PB_MINOR)
+        self.assertEqual([r["row"] for r in rep["rows"]],
+                         [r["row"] for r in plain["rows"]])
+        self.assertEqual(rep["status"], "ok")
+        self.assertTrue(rep["closed"])
+        self.assertEqual(rep["total_rows"], 60)
+        self.assertEqual(rep["total_leads"], 5)
+        self.assertEqual(rep["problems"], [])
+        # switch point keeps the rows around the lead boundary
+        (sw,) = rep["switches"]
+        self.assertEqual(sw["at_index"], 24)
+        self.assertEqual(sw["before_row"], "156342")   # lead head after 2 leads
+        self.assertEqual(sw["after_row"], "513624")    # plain-course row 25
+        # method usage aggregated across both segments
+        self.assertEqual(rep["methods_used"],
+                         [{"method_id": 1, "name": "M1", "version": 1,
+                           "leads": 5, "rows": 60, "segments": [1, 2]}])
+        self.assertEqual(rep["segments"][0]["start_row"], "123456")
+        self.assertEqual(rep["segments"][0]["end_row"], "156342")
+        self.assertEqual(rep["segments"][1]["end_row"], "123456")
+
+    def test_cross_method_splice_rows_tagged(self):
+        rep = analyze_spliced([_seg(1, PB_MINOR, 2, name="PB"),
+                               _seg(2, PB_MINOR_14, 2, name="PB14"),
+                               _seg(1, PB_MINOR, 1, name="PB")])
+        self.assertEqual(rep["total_rows"], 60)
+        self.assertEqual(rep["status"], "not_closed")
+        self.assertFalse(rep["closed"])
+        self.assertTrue(rep["truth"]["true"])
+        # every generated row is tagged with segment + method version
+        r25 = rep["rows"][25]
+        self.assertEqual((r25["segment"], r25["method_id"], r25["method"],
+                          r25["version"], r25["lead"], r25["change"]),
+                         (2, 2, "PB14", 1, 1, 1))
+        self.assertIsNone(r25["override"])
+        r49 = rep["rows"][49]
+        self.assertEqual((r49["segment"], r49["method_id"]), (3, 1))
+        # segment boundaries continue from the previous segment's last row
+        self.assertEqual([(s["start_row"], s["end_row"]) for s in rep["segments"]],
+                         [("123456", "156342"), ("156342", "156234"),
+                          ("156234", "163542")])
+        self.assertEqual([(s["at_index"], s["before_row"], s["after_row"])
+                          for s in rep["switches"]],
+                         [(24, "156342", "513624"), (48, "156234", "512643")])
+        self.assertEqual(rep["methods_used"],
+                         [{"method_id": 1, "name": "PB", "version": 1,
+                           "leads": 3, "rows": 36, "segments": [1, 3]},
+                          {"method_id": 2, "name": "PB14", "version": 1,
+                           "leads": 2, "rows": 24, "segments": [2]}])
+
+    def test_unified_truth_across_segments(self):
+        # two one-lead segments: the repeat's second occurrence lies in the
+        # next segment - truth is judged on the whole touch, not per method
+        rep = analyze_spliced([_seg(1, "x.14.x", 1, stage=4),
+                               _seg(2, "x.14.x", 1, stage=4)])
+        self.assertEqual(rep["status"], "untrue")
+        self.assertTrue(rep["closed"])
+        self.assertIsNone(rep["premature_rounds"])
+        repeat = rep["truth"]["first_repeat"]
+        self.assertEqual(repeat["row"], "2413")
+        self.assertEqual(repeat["first"],
+                         {"index": 2, "segment": 1, "lead": 1, "change": 2})
+        self.assertEqual(repeat["second"],
+                         {"index": 4, "segment": 2, "lead": 1, "change": 1})
+        self.assertTrue(rep["rows"][4]["repeat"])
+        self.assertEqual(rep["rows"][4]["segment"], 2)
+        self.assertEqual(rep["problems"], ["untrue"])
+
+    def test_premature_rounds_and_not_closed(self):
+        # the plain course comes round at row 60 but the touch goes on
+        rep = analyze_spliced([_seg(1, PB_MINOR, 5), _seg(1, PB_MINOR, 1)])
+        self.assertEqual(rep["status"], "not_closed")
+        self.assertEqual(rep["problems"],
+                         ["untrue", "premature_rounds", "not_closed"])
+        self.assertEqual(rep["premature_rounds"],
+                         {"index": 60, "segment": 1, "lead": 5, "change": 12})
+        repeat = rep["truth"]["first_repeat"]
+        self.assertEqual(repeat["row"], "123456")
+        self.assertEqual(repeat["first"],
+                         {"index": 0, "segment": 0, "lead": 0, "change": 0})
+        self.assertEqual(repeat["second"],
+                         {"index": 60, "segment": 1, "lead": 5, "change": 12})
+
+    def test_override_within_segment(self):
+        rep = analyze_spliced([_seg(1, PB_MINOR, 1, overrides=[
+            {"lead": 1, "change": 12, "notation": "14"}])])
+        self.assertEqual(rep["total_rows"], 12)
+        (ovr,) = rep["overrides"]
+        self.assertTrue(ovr["applied"])
+        self.assertEqual(ovr["segment"], 1)
+        self.assertEqual(ovr["replaces_token"], "12")
+        self.assertEqual(ovr["before_row"], "132546")
+        self.assertEqual(ovr["after_row"], "123564")
+        self.assertEqual(ovr["row_index"], 12)
+        # the row entry carries the override source
+        entry = rep["rows"][12]
+        self.assertEqual(entry["override"],
+                         {"segment": 1, "lead": 1, "change": 12,
+                          "notation": "14", "replaces_token": "12"})
+        self.assertEqual(entry["token"], "14")
+        self.assertEqual(entry["row"], "123564")
+        self.assertEqual(rep["unapplied_overrides"], [])
+
+    def test_superseded_override_reported_unapplied(self):
+        rep = analyze_spliced([_seg(1, PB_MINOR, 1, overrides=[
+            {"lead": 1, "change": 12, "notation": "14"},
+            {"lead": 1, "change": 12, "notation": "16"}])])
+        first, second = rep["overrides"]
+        self.assertFalse(first["applied"])
+        self.assertTrue(first["superseded"])
+        self.assertTrue(second["applied"])
+        self.assertEqual(rep["rows"][12]["token"], "16")  # last spec wins
+        self.assertEqual(rep["unapplied_overrides"],
+                         [{"segment": 1, "lead": 1, "change": 12,
+                           "notation": "14", "replaces_token": "12",
+                           "reason": "superseded by a later override for the"
+                                     " same change"}])
+
+    def test_stage_mismatch_located(self):
+        with self.assertRaises(SplicedError) as ctx:
+            analyze_spliced([_seg(1, PB_MINOR, 1),
+                             _seg(2, "3.1.5.1.5.1.5.1.5.125", 1, stage=5)])
+        err = ctx.exception
+        self.assertEqual(err.segment, 2)
+        self.assertEqual(err.extra["stage"], 5)
+        self.assertEqual(err.extra["expected"], 6)
+
+    def test_override_out_of_range_located(self):
+        with self.assertRaises(SplicedError) as ctx:
+            analyze_spliced([_seg(1, PB_MINOR, 1, overrides=[
+                {"lead": 2, "change": 1, "notation": "14"}])])
+        self.assertEqual((ctx.exception.segment, ctx.exception.override), (1, 0))
+        with self.assertRaises(SplicedError) as ctx:
+            analyze_spliced([_seg(1, PB_MINOR, 2, overrides=[
+                {"lead": 1, "change": 99, "notation": "14"}])])
+        self.assertEqual((ctx.exception.segment, ctx.exception.override), (1, 0))
+        with self.assertRaises(SplicedError):
+            analyze_spliced([_seg(1, PB_MINOR, 1, overrides=[
+                {"lead": 1, "change": 1, "notation": "1a"}])])
+
+    def test_total_rows_limit_located(self):
+        with self.assertRaises(SplicedError) as ctx:
+            analyze_spliced([_seg(1, PB_MINOR, 2), _seg(1, PB_MINOR, 2)],
+                            max_rows=30)
+        err = ctx.exception
+        self.assertEqual(err.segment, 2)  # the segment that crosses the limit
+        self.assertEqual(err.extra["total_rows"], 48)
+        self.assertEqual(err.extra["max_rows"], 30)
+        # default limit is one extent: 61 leads of 12 rows > 720
+        with self.assertRaises(SplicedError):
+            analyze_spliced([_seg(1, PB_MINOR, 61)])
+
+    def test_bad_segment_specs(self):
+        with self.assertRaises(SplicedError):
+            analyze_spliced([])
+        with self.assertRaises(SplicedError):
+            analyze_spliced([_seg(1, PB_MINOR, 0)])
+        with self.assertRaises(SplicedError):
+            analyze_spliced(["not a dict"])
+        with self.assertRaises(ValueError):
+            analyze_spliced([_seg(1, PB_MINOR, 1)], max_rows=0)
+
+    def test_compare_touch_reports(self):
+        ta = analyze_spliced([_seg(1, PB_MINOR, 2), _seg(1, PB_MINOR, 3)])
+        tb = analyze_spliced([_seg(1, PB_MINOR, 2), _seg(2, PB_MINOR_14, 2),
+                              _seg(1, PB_MINOR, 1)])
+        cmp = compare_touch_reports(ta, tb)
+        self.assertTrue(cmp["same_stage"])
+        self.assertTrue(cmp["total_rows_equal"])
+        self.assertEqual(cmp["total_rows_delta"], 0)
+        self.assertFalse(cmp["both_closed"])   # tb does not come round
+        self.assertTrue(cmp["both_true"])
+        self.assertEqual(cmp["methods_overlap"], [1])
+        self.assertEqual(cmp["a"]["status"], "ok")
+        self.assertEqual(cmp["b"]["status"], "not_closed")
+
+
 class ApiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -420,6 +613,141 @@ class ApiTests(unittest.TestCase):
         status, out = self.call("GET", "/api/nope", expect=404)
         status, out = self.call("POST", "/api/analyses",
                                 {"method_id": 1, "max_rows": 0}, expect=400)
+
+    def test_08_touch_flow(self):
+        # two 6-bell method versions to splice
+        status, m1 = self.call("POST", "/api/methods",
+                               {"name": "Splice Demo PB", "stage": 6,
+                                "notation": PB_MINOR})
+        status, m2 = self.call("POST", "/api/methods",
+                               {"name": "Splice Demo PB14", "stage": 6,
+                                "notation": PB_MINOR_14})
+        # three segments with a bob inside segment 2
+        body = {"segments": [
+            {"method_id": m1["id"], "leads": 2},
+            {"method_id": m2["id"], "leads": 2,
+             "overrides": [{"lead": 1, "change": 12, "notation": "12"}]},
+            {"method_id": m1["id"], "leads": 1}]}
+        status, t = self.call("POST", "/api/touches", body)
+        self.assertEqual(status, 201)
+        self.assertEqual(t["segment_count"], 3)
+        self.assertEqual(t["total_rows"], 60)
+        self.assertEqual(t["total_leads"], 5)
+        self.assertEqual(t["status"], "not_closed")
+        self.assertIn("report", t["links"])
+        tid = t["id"]
+        # list
+        status, lst = self.call("GET", "/api/touches")
+        self.assertTrue(any(x["id"] == tid for x in lst["touches"]))
+        # full report
+        status, full = self.call("GET", f"/api/touches/{tid}")
+        rep = full["report"]
+        self.assertEqual(len(rep["switches"]), 2)
+        self.assertEqual(rep["switches"][0]["before_row"], "156342")
+        self.assertEqual(len(rep["segments"]), 3)
+        self.assertEqual(rep["segments"][1]["method_id"], m2["id"])
+        self.assertTrue(rep["overrides"][0]["applied"])
+        self.assertEqual(rep["unapplied_overrides"], [])
+        self.assertEqual(full["segments"], body["segments"])  # spec kept
+        # rows by segment: segment 2 covers indexes 25..48
+        status, rows = self.call("GET", f"/api/touches/{tid}/rows?segment=2")
+        self.assertEqual(rows["matched"], 24)
+        self.assertTrue(all(r["segment"] == 2 for r in rows["rows"]))
+        self.assertEqual(rows["rows"][0]["index"], 25)
+        self.assertEqual(rows["rows"][0]["method_id"], m2["id"])
+        # the override row carries its source
+        ovr_row = [r for r in rows["rows"] if r["override"]][0]
+        self.assertEqual(ovr_row["override"]["segment"], 2)
+        self.assertEqual(ovr_row["override"]["notation"], "12")
+        # global slicing still works
+        status, rows = self.call("GET", f"/api/touches/{tid}/rows?from=0&to=12")
+        self.assertEqual(len(rows["rows"]), 13)
+        self.assertEqual(rows["rows"][0]["segment"], 0)
+        # unknown segment
+        status, out = self.call("GET", f"/api/touches/{tid}/rows?segment=9",
+                                expect=404)
+        # download
+        req = urllib.request.Request(self.base + f"/api/touches/{tid}/download")
+        with urllib.request.urlopen(req) as resp:
+            self.assertEqual(resp.status, 200)
+            self.assertIn("attachment", resp.headers["Content-Disposition"])
+            payload = json.loads(resp.read().decode())
+            self.assertEqual(payload["report"]["segment_count"], 3)
+        # a second touch (the plain course as one segment) and compare
+        status, t2 = self.call("POST", "/api/touches",
+                               {"segments": [{"method_id": m1["id"], "leads": 5}]})
+        self.assertEqual(t2["status"], "ok")
+        self.assertTrue(t2["closed"])
+        status, cmp = self.call("GET",
+                                f"/api/touches/compare?a={tid}&b={t2['id']}")
+        self.assertEqual(status, 200)
+        self.assertEqual(cmp["a"]["touch_id"], tid)
+        c = cmp["comparison"]
+        self.assertTrue(c["same_stage"])
+        self.assertTrue(c["total_rows_equal"])
+        self.assertFalse(c["both_closed"])
+        self.assertEqual(c["methods_overlap"], [m1["id"]])
+        status, cmp2 = self.call("POST", "/api/touches/compare",
+                                 {"a": tid, "b": t2["id"]})
+        self.assertEqual(status, 200)
+
+    def test_09_touch_errors_not_stored(self):
+        status, before = self.call("GET", "/api/touches")
+        n_before = len(before["touches"])
+        status, m1 = self.call("GET", "/api/methods")
+        pb = next(m for m in m1["methods"] if m["name"] == "Splice Demo PB")
+        # 5-bell method for the stage mismatch
+        status, gd = self.call("POST", "/api/methods",
+                               {"name": "Grandsire Doubles", "stage": 5,
+                                "notation": "3.1.5.1.5.1.5.1.5.125"})
+        # method not found: 404 located to the segment
+        status, out = self.call("POST", "/api/touches",
+                                {"segments": [{"method_id": pb["id"], "leads": 1},
+                                              {"method_id": 9999, "leads": 1}]},
+                                expect=404)
+        self.assertEqual(out["code"], "not_found")
+        self.assertEqual(out["segment"], 2)
+        self.assertEqual(out["method_id"], 9999)
+        # stage mismatch
+        status, out = self.call("POST", "/api/touches",
+                                {"segments": [{"method_id": pb["id"], "leads": 1},
+                                              {"method_id": gd["id"], "leads": 1}]},
+                                expect=400)
+        self.assertEqual(out["code"], "bad_segment")
+        self.assertEqual(out["segment"], 2)
+        self.assertEqual(out["stage"], 5)
+        self.assertEqual(out["expected"], 6)
+        # override out of range
+        status, out = self.call("POST", "/api/touches",
+                                {"segments": [{"method_id": pb["id"], "leads": 1,
+                                               "overrides": [{"lead": 1,
+                                                              "change": 99,
+                                                              "notation": "14"}]}]},
+                                expect=400)
+        self.assertEqual(out["code"], "bad_segment")
+        self.assertEqual(out["segment"], 1)
+        self.assertEqual(out["override"], 0)
+        # total rows beyond one extent (61 * 12 = 732 > 720)
+        status, out = self.call("POST", "/api/touches",
+                                {"segments": [{"method_id": pb["id"], "leads": 61}]},
+                                expect=400)
+        self.assertEqual(out["code"], "bad_segment")
+        self.assertEqual(out["total_rows"], 732)
+        self.assertEqual(out["max_rows"], 720)
+        # malformed requests
+        status, out = self.call("POST", "/api/touches", {"segments": []},
+                                expect=400)
+        status, out = self.call("POST", "/api/touches",
+                                {"segments": [{"method_id": pb["id"],
+                                               "leads": 0}]}, expect=400)
+        self.assertEqual(out["segment"], 1)
+        status, out = self.call("POST", "/api/touches",
+                                {"segments": [{"leads": 1}]}, expect=400)
+        status, out = self.call("GET", "/api/touches/9999", expect=404)
+        status, out = self.call("GET", "/api/touches/compare", expect=400)
+        # none of the failed touches was stored
+        status, after = self.call("GET", "/api/touches")
+        self.assertEqual(len(after["touches"]), n_before)
 
 
 if __name__ == "__main__":

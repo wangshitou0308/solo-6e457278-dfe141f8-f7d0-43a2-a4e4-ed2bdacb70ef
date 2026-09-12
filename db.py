@@ -1,8 +1,9 @@
 """SQLite persistence for the change-ringing API.
 
-Two tables:
+Three tables:
     methods   - one row per method *version* (same name => version increments)
     analyses  - one row per analysis report, linked to a method version
+    touches   - one row per spliced-touch report, spanning method versions
 """
 
 from __future__ import annotations
@@ -27,6 +28,15 @@ CREATE TABLE IF NOT EXISTS analyses (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     method_id  INTEGER NOT NULL REFERENCES methods(id),
     overrides  TEXT NOT NULL DEFAULT '[]',
+    max_rows   INTEGER,
+    status     TEXT NOT NULL,
+    report     TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS touches (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    stage      INTEGER NOT NULL,
+    segments   TEXT NOT NULL,
     max_rows   INTEGER,
     status     TEXT NOT NULL,
     report     TEXT NOT NULL,
@@ -111,5 +121,35 @@ class Store:
     def _decode_analysis(row):
         rec = dict(row)
         rec["overrides"] = json.loads(rec["overrides"])
+        rec["report"] = json.loads(rec["report"])
+        return rec
+
+    # ---------------------------------------------------------------- touches
+    def create_touch(self, stage, segments, max_rows, status, report):
+        """Store a spliced-touch report; returns the full touch record."""
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "INSERT INTO touches (stage, segments, max_rows, status, report,"
+                " created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (stage, json.dumps(segments), max_rows, status,
+                 json.dumps(report), _now()))
+            return self.get_touch(cur.lastrowid)
+
+    def get_touch(self, touch_id):
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM touches WHERE id = ?", (touch_id,)).fetchone()
+        return self._decode_touch(row) if row else None
+
+    def list_touches(self):
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM touches ORDER BY id").fetchall()
+        return [self._decode_touch(r) for r in rows]
+
+    @staticmethod
+    def _decode_touch(row):
+        rec = dict(row)
+        rec["segments"] = json.loads(rec["segments"])
         rec["report"] = json.loads(rec["report"])
         return rec

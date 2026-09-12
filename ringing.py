@@ -1,4 +1,5 @@
-"""Core change-ringing engine: place-notation parsing, row expansion, truth analysis.
+"""Core change-ringing engine: place-notation parsing, row expansion, truth
+analysis and spliced-touch composition.
 
 Only Python's standard library is used so the whole API works offline.
 
@@ -51,6 +52,33 @@ class NotationError(ValueError):
             out["token"] = self.token
         if self.offset is not None:
             out["offset"] = self.offset
+        return out
+
+
+class SplicedError(ValueError):
+    """A spliced-touch error, located to a segment (1-based).
+
+    Attributes:
+        message:  human readable description
+        segment:  1-based index of the offending segment (if applicable)
+        override: 0-based index of the offending override within the segment
+        extra:    additional structured details (token, offset, totals...)
+    """
+
+    def __init__(self, message, segment=None, override=None, extra=None):
+        super().__init__(message)
+        self.message = message
+        self.segment = segment
+        self.override = override
+        self.extra = extra or {}
+
+    def to_dict(self):
+        out = {"error": self.message}
+        if self.segment is not None:
+            out["segment"] = self.segment
+        if self.override is not None:
+            out["override"] = self.override
+        out.update(self.extra)
         return out
 
 
@@ -385,6 +413,335 @@ def analyze(stage, notation, start_row=None, overrides=None, max_rows=None):
         "overrides": override_reports,
         "problems": problems,
         "rows": entries,
+    }
+
+
+def _locate_spliced(index, layout):
+    """Map a touch row index to {'index', 'segment', 'lead', 'change'} (1-based)."""
+    if index <= 0:
+        return {"index": 0, "segment": 0, "lead": 0, "change": 0}
+    for seg_i, lay in enumerate(layout, start=1):
+        if index <= lay["to_index"]:
+            offset = index - lay["from_index"]
+            return {"index": index, "segment": seg_i,
+                    "lead": (offset - 1) // lay["lead_length"] + 1,
+                    "change": (offset - 1) % lay["lead_length"] + 1}
+    return {"index": index, "segment": None, "lead": None, "change": None}
+
+
+def _notation_details(err):
+    out = {}
+    if err.token is not None:
+        out["token"] = err.token
+    if err.offset is not None:
+        out["offset"] = err.offset
+    return out
+
+
+def analyze_spliced(segments, start_row=None, max_rows=None):
+    """Expand a spliced touch across method segments and check its truth.
+
+    segments: list of {"method_id", "name", "version", "stage", "notation",
+        "leads", "overrides"?}.  Every segment must use the same number of
+        bells; "leads" gives the number of whole leads to ring, so method
+        switches only ever happen at lead boundaries.  "overrides" replace
+        single changes inside the segment: {"lead": L, "change": K,
+        "notation": "14"} with L counted from 1 within the segment.
+
+    The touch starts at start_row (default rounds); each following segment
+    continues from the previous segment's last row - the methods' own
+    start_rows are NOT re-applied.  Repeated rows, a premature return to
+    the start row, closure at the end and the row limit are judged across
+    the whole touch, never from the individual methods' own truth.
+
+    Raises SplicedError (located to a segment) on inconsistent stages, bad
+    leads, out-of-range overrides or a cumulative row count above max_rows;
+    nothing is expanded in that case.
+    """
+    if not isinstance(segments, (list, tuple)) or not segments:
+        raise SplicedError("segments must be a non-empty list")
+    if max_rows is not None:
+        if isinstance(max_rows, bool) or not isinstance(max_rows, int) \
+                or max_rows < 1:
+            raise ValueError("max_rows must be a positive integer")
+        if max_rows > HARD_MAX_ROWS:
+            raise ValueError(f"max_rows may not exceed {HARD_MAX_ROWS}")
+
+    infos = []
+    stage = None
+    effective_max = max_rows
+    total_rows = 0
+    total_leads = 0
+    for i, spec in enumerate(segments, start=1):
+        if not isinstance(spec, dict):
+            raise SplicedError("segment must be an object", segment=i)
+        seg_stage = spec.get("stage")
+        check_stage(seg_stage)  # NotationError on a bad/missing stage
+        if stage is None:
+            stage = seg_stage
+            if effective_max is None:
+                effective_max = math.factorial(stage)
+        elif seg_stage != stage:
+            raise SplicedError(
+                f"stage mismatch: segment has {seg_stage} bells, "
+                f"the touch is on {stage}", segment=i,
+                extra={"stage": seg_stage, "expected": stage})
+        leads = spec.get("leads")
+        if isinstance(leads, bool) or not isinstance(leads, int) or leads < 1:
+            raise SplicedError("leads must be a positive integer", segment=i,
+                               extra={"leads": leads})
+        try:
+            changes = parse_notation(spec.get("notation"), stage)
+        except NotationError as err:
+            raise SplicedError(err.message, segment=i,
+                               extra=_notation_details(err))
+        lead_len = len(changes)
+        # Per-segment overrides: {(lead, change): Change}; when two specs
+        # target the same change the last one wins and the earlier one is
+        # reported as superseded (never applied).
+        override_map = {}
+        override_owner = {}
+        override_reports = []
+        for j, ospec in enumerate(spec.get("overrides") or []):
+            if not isinstance(ospec, dict):
+                raise SplicedError("override must be an object",
+                                   segment=i, override=j)
+            try:
+                olead = int(ospec["lead"])
+                opos = int(ospec["change"])
+                onotation = ospec["notation"]
+            except (KeyError, TypeError, ValueError):
+                raise SplicedError(
+                    "override needs integer 'lead' and 'change' plus 'notation'",
+                    segment=i, override=j)
+            if not 1 <= olead <= leads:
+                raise SplicedError(
+                    f"override lead must be between 1 and {leads} "
+                    f"(the segment's lead count)", segment=i, override=j,
+                    extra={"lead": olead, "leads": leads})
+            if not 1 <= opos <= lead_len:
+                raise SplicedError(
+                    f"override change must be between 1 and {lead_len} "
+                    f"(the lead length)", segment=i, override=j,
+                    extra={"change": opos, "lead_length": lead_len})
+            try:
+                ochanges = parse_notation(onotation, stage)
+            except NotationError as err:
+                raise SplicedError(err.message, segment=i, override=j,
+                                   extra=_notation_details(err))
+            if len(ochanges) != 1:
+                raise SplicedError(
+                    f"override notation must be exactly one change, "
+                    f"got {len(ochanges)}", segment=i, override=j)
+            key = (olead, opos)
+            if key in override_owner:
+                override_owner[key]["superseded"] = True
+            rep = {"segment": i, "lead": olead, "change": opos,
+                   "notation": onotation, "parsed": ochanges[0].to_dict(),
+                   "replaces_token": changes[opos - 1].token, "applied": False}
+            override_map[key] = ochanges[0]
+            override_owner[key] = rep
+            override_reports.append(rep)
+        total_rows += leads * lead_len
+        total_leads += leads
+        if total_rows > effective_max:
+            raise SplicedError(
+                f"total rows {total_rows} exceed the limit of {effective_max}",
+                segment=i, extra={"total_rows": total_rows,
+                                  "max_rows": effective_max})
+        infos.append({"method_id": spec.get("method_id"),
+                      "name": spec.get("name"),
+                      "version": spec.get("version"),
+                      "leads": leads, "lead_len": lead_len, "changes": changes,
+                      "override_map": override_map,
+                      "override_owner": override_owner,
+                      "override_reports": override_reports})
+
+    start = parse_row(start_row, stage)
+    extent = math.factorial(stage)
+
+    # Row layout: segment i covers the global indexes (from_index, to_index].
+    layout = []
+    cum = 0
+    for info in infos:
+        n = info["leads"] * info["lead_len"]
+        layout.append({"from_index": cum, "to_index": cum + n,
+                       "lead_length": info["lead_len"]})
+        cum += n
+
+    rows = [start]
+    entries = [{"index": 0, "segment": 0, "method_id": None, "method": None,
+                "version": None, "lead": 0, "change": 0, "row": row_str(start),
+                "token": None, "override": None, "repeat": False}]
+    seen = {start: 0}
+    first_repeat = None
+    premature = None
+    step = 0
+    # Expand the whole composition: every segment rings all of its leads,
+    # continuing from the previous segment's last row.  Repeats and a
+    # premature return to the start row are recorded against the whole
+    # touch; the expansion never resets to a method's own start row.
+    for i, info in enumerate(infos, start=1):
+        changes = info["changes"]
+        lead_len = info["lead_len"]
+        for lead in range(1, info["leads"] + 1):
+            for pos in range(1, lead_len + 1):
+                key = (lead, pos)
+                is_override = key in info["override_map"]
+                change = (info["override_map"][key] if is_override
+                          else changes[pos - 1])
+                nxt = change.apply(rows[-1])
+                step += 1
+                rows.append(nxt)
+                closing = nxt == start and step == total_rows
+                is_repeat = nxt in seen and not closing
+                if is_repeat and first_repeat is None:
+                    first_repeat = {"row": row_str(nxt),
+                                    "first": _locate_spliced(seen[nxt], layout),
+                                    "second": _locate_spliced(step, layout)}
+                if nxt == start and not closing and premature is None:
+                    premature = _locate_spliced(step, layout)
+                override_src = None
+                if is_override:
+                    rep = info["override_owner"][key]
+                    rep["applied"] = True
+                    rep["row_index"] = step
+                    rep["before_row"] = row_str(rows[step - 1])
+                    rep["after_row"] = row_str(nxt)
+                    override_src = {"segment": i, "lead": lead, "change": pos,
+                                    "notation": rep["notation"],
+                                    "replaces_token": rep["replaces_token"]}
+                entries.append({"index": step, "segment": i,
+                                "method_id": info["method_id"],
+                                "method": info["name"],
+                                "version": info["version"],
+                                "lead": lead, "change": pos,
+                                "row": row_str(nxt), "token": change.token,
+                                "override": override_src, "repeat": is_repeat})
+                if not is_repeat:
+                    seen[nxt] = step
+
+    closed = rows[-1] == start
+    if not closed:
+        status = "not_closed"
+    elif premature is not None:
+        status = "premature_rounds"
+    elif first_repeat is not None:
+        status = "untrue"
+    else:
+        status = "ok"
+    problems = []
+    if first_repeat is not None:
+        problems.append("untrue")
+    if premature is not None:
+        problems.append("premature_rounds")
+    if not closed:
+        problems.append("not_closed")
+
+    switches = []
+    for i in range(1, len(infos)):
+        boundary = layout[i]["from_index"]
+        prev, cur = infos[i - 1], infos[i]
+        switches.append({
+            "at_index": boundary,
+            "from_segment": i, "to_segment": i + 1,
+            "from_method_id": prev["method_id"], "from_method": prev["name"],
+            "from_version": prev["version"],
+            "to_method_id": cur["method_id"], "to_method": cur["name"],
+            "to_version": cur["version"],
+            "before_row": row_str(rows[boundary]),
+            "after_row": row_str(rows[boundary + 1]),
+        })
+
+    used = {}
+    for i, info in enumerate(infos, start=1):
+        mid = info["method_id"]
+        entry = used.setdefault(mid, {"method_id": mid, "name": info["name"],
+                                      "version": info["version"],
+                                      "leads": 0, "rows": 0, "segments": []})
+        entry["leads"] += info["leads"]
+        entry["rows"] += info["leads"] * info["lead_len"]
+        entry["segments"].append(i)
+
+    seg_summaries = []
+    for i, info in enumerate(infos, start=1):
+        lay = layout[i - 1]
+        seg_summaries.append({
+            "index": i, "method_id": info["method_id"], "name": info["name"],
+            "version": info["version"], "leads": info["leads"],
+            "lead_length": info["lead_len"],
+            "rows": lay["to_index"] - lay["from_index"],
+            "from_index": lay["from_index"], "to_index": lay["to_index"],
+            "start_row": row_str(rows[lay["from_index"]]),
+            "end_row": row_str(rows[lay["to_index"]]),
+            "overrides": info["override_reports"],
+        })
+
+    all_overrides = [rep for info in infos for rep in info["override_reports"]]
+    unapplied = []
+    for rep in all_overrides:
+        if rep["applied"]:
+            continue
+        brief = {k: rep[k] for k in
+                 ("segment", "lead", "change", "notation", "replaces_token")}
+        if rep.get("superseded"):
+            brief["reason"] = "superseded by a later override for the same change"
+        unapplied.append(brief)
+
+    return {
+        "stage": stage,
+        "start_row": row_str(start),
+        "segments": seg_summaries,
+        "segment_count": len(infos),
+        "total_leads": total_leads,
+        "total_rows": total_rows,
+        "rows_generated": step,
+        "max_rows": effective_max,
+        "extent_rows": extent,
+        "status": status,          # ok | untrue | premature_rounds | not_closed
+        "closed": closed,
+        "truth": {"true": first_repeat is None, "first_repeat": first_repeat},
+        "premature_rounds": premature,
+        "switches": switches,
+        "methods_used": list(used.values()),
+        "overrides": all_overrides,
+        "unapplied_overrides": unapplied,
+        "problems": problems,
+        "rows": entries,
+    }
+
+
+def _touch_summary(report):
+    keys = ("status", "closed", "stage", "total_rows", "total_leads",
+            "segment_count", "problems")
+    out = {k: report[k] for k in keys}
+    out["truth"] = report["truth"]
+    out["methods_used"] = [{k: m[k] for k in
+                            ("method_id", "name", "version", "leads", "rows")}
+                           for m in report["methods_used"]]
+    return out
+
+
+def compare_touch_reports(report_a, report_b):
+    """Compare two spliced-touch reports: size, closure, truth, methods."""
+    fa = report_a["truth"]["first_repeat"]
+    fb = report_b["truth"]["first_repeat"]
+    same_repeat = None
+    if fa and fb:
+        same_repeat = ((fa["first"]["index"], fa["second"]["index"])
+                       == (fb["first"]["index"], fb["second"]["index"]))
+    ids_a = {m["method_id"] for m in report_a["methods_used"]}
+    ids_b = {m["method_id"] for m in report_b["methods_used"]}
+    return {
+        "a": _touch_summary(report_a),
+        "b": _touch_summary(report_b),
+        "same_stage": report_a["stage"] == report_b["stage"],
+        "total_rows_equal": report_a["total_rows"] == report_b["total_rows"],
+        "total_rows_delta": report_a["total_rows"] - report_b["total_rows"],
+        "both_closed": report_a["closed"] and report_b["closed"],
+        "both_true": report_a["truth"]["true"] and report_b["truth"]["true"],
+        "first_repeat_same_position": same_repeat,
+        "methods_overlap": sorted(ids_a & ids_b),
     }
 
 
