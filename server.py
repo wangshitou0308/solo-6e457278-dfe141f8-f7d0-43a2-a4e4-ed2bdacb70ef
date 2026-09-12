@@ -16,9 +16,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 from db import Store
-from ringing import (HARD_MAX_ROWS, NotationError, SplicedError, analyze,
-                     analyze_spliced, compare_reports, compare_touch_reports,
-                     parse_notation, parse_row, row_str)
+from ringing import (HARD_MAX_ROWS, LimitRequiredError, NotationError,
+                     SplicedError, analyze, analyze_spliced, compare_reports,
+                     compare_touch_reports, parse_notation, parse_row, row_str)
 
 DOCS_HTML = """<!doctype html>
 <html lang="zh">
@@ -39,22 +39,48 @@ h1,h2{border-bottom:1px solid #ddd;padding-bottom:.25em}
 <body>
 <h1>换位法校验 API <small>Change Ringing Method Validator</small></h1>
 <p>英式鸣钟（change ringing）换位法校验服务。纯 Python 标准库（http.server + sqlite3），断网可用。
-所有接口（除本页外）均接收/返回 JSON；错误返回 <code>{"error": …, "code": …}</code>，
-记号错误另附 <code>token</code>（原记号）与 <code>offset</code>（在记号串中的位置），绝不自动修正。</p>
+支持 <strong>4–12 口钟</strong>。所有接口（除本页外）均接收/返回 JSON；错误返回
+<code>{"error": …, "code": …}</code>，记号错误另附 <code>token</code>（原记号）与
+<code>offset</code>（在记号串中的位置），绝不自动修正。</p>
+
+<h2>10–12 口钟的符号</h2>
+<p>钟号 10、11、12 在 place notation 与紧凑 row 中分别写作单字符
+<code>0</code>、<code>E</code>、<code>T</code>；rounds（12 口）为
+<code>1234567890ET</code>，<code>row_str([1,…,12]) == "1234567890ET"</code>。
+数组输入仍用整数：<code>[1,2,…,10,11,12]</code>；分隔串两种都接受：
+<code>"1 2 … 10 11 12"</code> 或 <code>"1 2 … 0 E T"</code>。</p>
+<ul>
+<li>place notation 中每个字符是一个 place：<code>"10"</code> 表示位置 <strong>1 与 10</strong>，
+绝不是两位数“十”；单独表示 10 号位请写 <code>0</code>（如 <code>02</code>＝places 2 与 10）。
+11 口用 <code>E</code>、12 口用 <code>T</code>，例如 Maximus 的 <code>1T</code>＝places 1 与 12。</li>
+<li>10 口起一个 extent（<code>stage!</code> 行）超过硬上限
+1,000,000（10! = 3,628,800）：创建分析/touch 时<strong>必须显式传
+<code>max_rows</code></strong>（1..1,000,000），否则拒绝创建（错误码
+<code>limit_required</code>）；显式值超过 1,000,000 一律拒绝。</li>
+<li>触顶（未闭合且未发现重复）时<strong>不给完整 truth 结论</strong>：
+<code>truth.true</code> 为 <code>null</code>、<code>truth.conclusive</code> 为
+<code>false</code>，并给出 <code>truth.checked_rows</code>（已检查行数）与
+<code>problems</code> 中的 <code>truth_inconclusive</code>；发现重复则照常判 <code>untrue</code>。</li>
+</ul>
 
 <h2>Place notation 语法</h2>
 <table>
 <tr><th>记号</th><th>含义</th></tr>
 <tr><td><code>x</code> / <code>X</code> / <code>-</code></td><td>全换（cross）：所有相邻位置交换，无 place</td></tr>
-<tr><td><code>1</code>…<code>8</code></td><td>place：该位置的钟不动，如 <code>16</code>、<code>1256</code></td></tr>
+<tr><td><code>1</code>…<code>9</code> <code>0</code> <code>E</code> <code>T</code></td><td>
+place：该位置的钟不动；每个字符一个 place，如 <code>16</code>、<code>1256</code>、
+<code>10</code>（1 与 10）、<code>1T</code>（1 与 12）</td></tr>
 <tr><td><code>.</code></td><td>分隔各个 change（<code>x</code>/<code>-</code> 前后可省略）；空白字符忽略</td></tr>
 <tr><td><code>,</code></td><td>对称展开：<code>a,b</code> → <code>a + reverse(a[:-1]) + b</code>（a 的最后一个
-change 是 half-lead 支点，镜像不重复；b 是 lead end）。如 <code>x16x16x16,12</code> →
-<code>x.16.x.16.x.16.x.16.x.16.x.12</code>（12 变，即 Plain Bob Minor）；至多一个逗号</td></tr>
+change 是 half-lead 支点，镜像不重复；b 是 lead end）。如 6 口 <code>x16x16x16,12</code> →
+Plain Bob Minor 的 12 变；10 口 <code>x10x10x10x10x10,12</code> → Plain Bob Royal 的 20 变；
+12 口 <code>x1Tx1Tx1Tx1Tx1Tx1T,12</code> → Plain Bob Maximus 的 24 变；至多一个逗号</td></tr>
 </table>
-<p>解析规则：先按钟数补全可推断的首尾 place（如 6 口钟上 <code>3</code> → <code>36</code>、
-<code>2</code> → <code>12</code>）；其余位置必须组成相邻交换对。非法字符、place 越界、
-同一 change 内 place 重复、无法配对的 place 都会报错并定位到原记号。</p>
+<p>解析规则：先按钟数补全可推断的首尾 place（如 6 口钟 <code>3</code> → <code>36</code>、
+12 口钟 <code>3</code> → <code>3T</code>）；其余位置必须组成相邻交换对。非法字符、place 越界、
+同一 change 内 place 重复、无法配对的 place 都会报错并定位到原记号。紧凑 row 出现
+非法符号、重复钟、超出 stage 或缺钟（长度不符/非 1..stage 的排列）时，同样定位原 token 与
+offset（字符串为字符偏移，数组为元素下标）。</p>
 
 <h2>分析语义</h2>
 <ul>
@@ -64,6 +90,11 @@ change 是 half-lead 支点，镜像不重复；b 是 lead end）。如 <code>x1
 <li>lead 中途回到 rounds → <code>premature_rounds</code>，同时视为对第 0 行的重复（标出 0 与该行）；
 达到上限仍未闭合 → <code>exceeded_limit</code> + <code>not_closed</code>；有重复 → <code>untrue</code>，分别报告。
 闭合（lead 边界回到起始排列）时的周期 leads/rows 总会给出。</li>
+<li>上限语义：默认上限是一个 extent（<code>stage!</code>）。达到上限仍未闭合时，
+若已出现重复则结论为 <code>untrue</code>；若尚未重复，<strong>不下“true”结论</strong>——
+<code>truth.true</code> 为 <code>null</code>、<code>truth.conclusive</code> 为 <code>false</code>、
+<code>truth.checked_rows</code> 给出已检查行数，<code>problems</code> 另加
+<code>truth_inconclusive</code>。4–8 口的 extent 均不超硬上限，既有行为与响应不变。</li>
 <li>组合（composition）：分析时可用 <code>overrides</code> 在指定 lead 的某一变以 notation 覆盖（如 bob/single），报告保留覆盖点前后轨迹。</li>
 </ul>
 
@@ -73,8 +104,10 @@ change 是 half-lead 支点，镜像不重复；b 是 lead end）。如 <code>x1
 change 覆盖（<code>overrides</code>，lead 从 1 起按段内计）。所有方法钟数必须一致；
 切换只发生在 lead 边界，下一段<strong>接着上一段末行</strong>展开，不会重置为各方法的 start_row。</li>
 <li>校验按区段报错且不落库：方法不存在（404）、钟数不一、leads 非法、覆盖越界
-（lead 超出段内 lead 数或 change 超出 lead 长度）、累计总行数超过上限
-（默认一个 extent = stage!）。错误体带 <code>segment</code>（及 <code>override</code>）定位。</li>
+（lead 超出段内 lead 数或 change 超出 lead 长度）、累计总行数超过上限。
+默认上限为一个 extent = <code>stage!</code>；10 口起 extent 超过 1,000,000，
+必须显式传 <code>max_rows</code> 才能创建（<code>limit_required</code>）。
+错误体带 <code>segment</code>（及 <code>override</code>）定位。</li>
 <li>整段 touch 统一判定 truth：重复 row、提前回到起始排列（premature_rounds）、
 结尾是否回到起始排列（closed）、row 上限——绝不用各方法单独的 truth 代替跨区段结论。</li>
 <li>逐行条目标明区段、方法版本（method_id/name/version）、lead、change 与覆盖来源
@@ -144,6 +177,33 @@ curl -sOJ localhost:8000/api/touches/1/download</pre>
  "code": "bad_segment", "segment": 2, "stage": 5, "expected": 6}
 {"error": "total rows 84 exceed the limit of 60", "code": "bad_segment",
  "segment": 3, "total_rows": 84, "max_rows": 60}</pre>
+<h2>示例：10 口（Royal）与 12 口（Maximus）</h2>
+<pre># 创建 Plain Bob Royal（10 口）：x10 的“10”是 places 1 与 10；
+# 10! 超过硬上限，必须显式给 max_rows
+curl -s -X POST localhost:8000/api/methods -d '{"name":"Plain Bob Royal","stage":10,
+  "notation":"x10x10x10x10x10,12","start_row":"1234567890"}'
+curl -s -X POST localhost:8000/api/analyses -d '{"method_id":100,"max_rows":180}'
+# lead head 为 1352749608；整 course 180 行，闭合且 true
+
+# 12 口 Plain Bob Maximus；只检查前 240 行 -> 未闭合、truth 不下结论
+curl -s -X POST localhost:8000/api/methods -d '{"name":"Plain Bob Maximus","stage":12,
+  "notation":"x1Tx1Tx1Tx1Tx1Tx1T,12"}'
+curl -s -X POST localhost:8000/api/analyses -d '{"method_id":101,"max_rows":240}'
+# -> {"status":"exceeded_limit","closed":false,
+#     "truth":{"true":null,"conclusive":false,"checked_rows":240,"first_repeat":null},
+#     "problems":["exceeded_limit","not_closed","truth_inconclusive"]}
+
+# 不传 max_rows 会被拒绝（错误码 limit_required）
+curl -s -X POST localhost:8000/api/analyses -d '{"method_id":101}'
+# -> {"code":"limit_required","error":"stage 12: one extent is 479,001,600 rows
+#     which exceeds the hard limit of 1,000,000; pass an explicit max_rows ...",
+#     "stage":12,"extent_rows":479001600,"hard_max_rows":1000000}
+
+# 紧凑 row 的重复/缺漏定位（数组输入用整数）
+curl -s -X POST localhost:8000/api/methods -d '{"name":"X","stage":12,
+  "notation":"x","start_row":"1234567890EE"}'
+# -> {"code":"notation_error","token":"E","offset":11,"error":"bell 11 appears ..."}</pre>
+
 <p>更多说明见仓库 <code>README.md</code>；演示脚本：<code>python3 examples.py</code>。</p>
 </body>
 </html>
@@ -151,7 +211,11 @@ curl -sOJ localhost:8000/api/touches/1/download</pre>
 
 API_INDEX = {
     "name": "Change Ringing Method Validator API",
-    "version": "1.0",
+    "version": "1.1",
+    "min_stage": 4,
+    "max_stage": 12,
+    "hard_max_rows": HARD_MAX_ROWS,
+    "bell_symbols": {"10": "0", "11": "E", "12": "T"},
     "docs": "/",
     "endpoints": [
         "POST /api/parse",
@@ -572,7 +636,7 @@ ROUTES = [
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "RingingAPI/1.0"
+    server_version = "RingingAPI/1.1"
     protocol_version = "HTTP/1.1"
 
     def do_GET(self):
@@ -605,6 +669,8 @@ class Handler(BaseHTTPRequestHandler):
                             err.status)
         except NotationError as err:
             self._send_json({"code": "notation_error", **err.to_dict()}, 400)
+        except LimitRequiredError as err:
+            self._send_json({"code": "limit_required", **err.to_dict()}, 400)
         except ValueError as err:
             self._send_json({"error": str(err), "code": "bad_request"}, 400)
         except BrokenPipeError:

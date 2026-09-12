@@ -1,0 +1,2255 @@
+{
+  "id": 1,
+  "created_at": "2026-09-12T00:00:00+00:00",
+  "method": {
+    "id": 1,
+    "name": "Plain Bob Royal",
+    "stage": 10,
+    "notation": "x10x10x10x10x10,12",
+    "start_row": "1234567890",
+    "version": 1,
+    "created_at": "2026-09-12T00:00:00+00:00"
+  },
+  "overrides": [],
+  "max_rows": 180,
+  "report": {
+    "stage": 10,
+    "notation": "x10x10x10x10x10,12",
+    "start_row": "1234567890",
+    "changes": [
+      {
+        "token": "x",
+        "offset": 0,
+        "completed": "x",
+        "places": [],
+        "swaps": [
+          [
+            1,
+            2
+          ],
+          [
+            3,
+            4
+          ],
+          [
+            5,
+            6
+          ],
+          [
+            7,
+            8
+          ],
+          [
+            9,
+            10
+          ]
+        ],
+        "cross": true
+      },
+      {
+        "token": "10",
+        "offset": 1,
+        "completed": "10",
+        "places": [
+          1,
+          10
+        ],
+        "swaps": [
+          [
+            2,
+            3
+          ],
+          [
+            4,
+            5
+          ],
+          [
+            6,
+            7
+          ],
+          [
+            8,
+            9
+          ]
+        ],
+        "cross": false
+      },
+      {
+        "token": "x",
+        "offset": 3,
+        "completed": "x",
+        "places": [],
+        "swaps": [
+          [
+            1,
+            2
+          ],
+          [
+            3,
+            4
+          ],
+          [
+            5,
+            6
+          ],
+          [
+            7,
+            8
+          ],
+          [
+            9,
+            10
+          ]
+        ],
+        "cross": true
+      },
+      {
+        "token": "10",
+        "offset": 4,
+        "completed": "10",
+        "places": [
+          1,
+          10
+        ],
+        "swaps": [
+          [
+            2,
+            3
+          ],
+          [
+            4,
+            5
+          ],
+          [
+            6,
+            7
+          ],
+          [
+            8,
+            9
+          ]
+        ],
+        "cross": false
+      },
+      {
+        "token": "x",
+        "offset": 6,
+        "completed": "x",
+        "places": [],
+        "swaps": [
+          [
+            1,
+            2
+          ],
+          [
+            3,
+            4
+          ],
+          [
+            5,
+            6
+          ],
+          [
+            7,
+            8
+          ],
+          [
+            9,
+            10
+          ]
+        ],
+        "cross": true
+      },
+      {
+        "token": "10",
+        "offset": 7,
+        "completed": "10",
+        "places": [
+          1,
+          10
+        ],
+        "swaps": [
+          [
+            2,
+            3
+          ],
+          [
+            4,
+            5
+          ],
+          [
+            6,
+            7
+          ],
+          [
+            8,
+            9
+          ]
+        ],
+        "cross": false
+      },
+      {
+        "token": "x",
+        "offset": 9,
+        "completed": "x",
+        "places": [],
+        "swaps": [
+          [
+            1,
+            2
+          ],
+          [
+            3,
+            4
+          ],
+          [
+            5,
+            6
+          ],
+          [
+            7,
+            8
+          ],
+          [
+            9,
+            10
+          ]
+        ],
+        "cross": true
+      },
+      {
+        "token": "10",
+        "offset": 10,
+        "completed": "10",
+        "places": [
+          1,
+          10
+        ],
+        "swaps": [
+          [
+            2,
+            3
+          ],
+          [
+            4,
+            5
+          ],
+          [
+            6,
+            7
+          ],
+          [
+            8,
+            9
+          ]
+        ],
+        "cross": false
+      },
+      {
+        "token": "x",
+        "offset": 12,
+        "completed": "x",
+        "places": [],
+        "swaps": [
+          [
+            1,
+            2
+          ],
+          [
+            3,
+            4
+          ],
+          [
+            5,
+            6
+          ],
+          [
+            7,
+            8
+          ],
+          [
+            9,
+            10
+          ]
+        ],
+        "cross": true
+      },
+      {
+        "token": "10",
+        "offset": 13,
+        "completed": "10",
+        "places": [
+          1,
+          10
+        ],
+        "swaps": [
+          [
+            2,
+            3
+          ],
+          [
+            4,
+            5
+          ],
+          [
+            6,
+            7
+          ],
+          [
+            8,
+            9
+          ]
+        ],
+        "cross": false
+      },
+      {
+        "token": "x",
+        "offset": 12,
+        "completed": "x",
+        "places": [],
+        "swaps": [
+          [
+            1,
+            2
+          ],
+          [
+            3,
+            4
+          ],
+          [
+            5,
+            6
+          ],
+          [
+            7,
+            8
+          ],
+          [
+            9,
+            10
+          ]
+        ],
+        "cross": true
+      },
+      {
+        "token": "10",
+        "offset": 10,
+        "completed": "10",
+        "places": [
+          1,
+          10
+        ],
+        "swaps": [
+          [
+            2,
+            3
+          ],
+          [
+            4,
+            5
+          ],
+          [
+            6,
+            7
+          ],
+          [
+            8,
+            9
+          ]
+        ],
+        "cross": false
+      },
+      {
+        "token": "x",
+        "offset": 9,
+        "completed": "x",
+        "places": [],
+        "swaps": [
+          [
+            1,
+            2
+          ],
+          [
+            3,
+            4
+          ],
+          [
+            5,
+            6
+          ],
+          [
+            7,
+            8
+          ],
+          [
+            9,
+            10
+          ]
+        ],
+        "cross": true
+      },
+      {
+        "token": "10",
+        "offset": 7,
+        "completed": "10",
+        "places": [
+          1,
+          10
+        ],
+        "swaps": [
+          [
+            2,
+            3
+          ],
+          [
+            4,
+            5
+          ],
+          [
+            6,
+            7
+          ],
+          [
+            8,
+            9
+          ]
+        ],
+        "cross": false
+      },
+      {
+        "token": "x",
+        "offset": 6,
+        "completed": "x",
+        "places": [],
+        "swaps": [
+          [
+            1,
+            2
+          ],
+          [
+            3,
+            4
+          ],
+          [
+            5,
+            6
+          ],
+          [
+            7,
+            8
+          ],
+          [
+            9,
+            10
+          ]
+        ],
+        "cross": true
+      },
+      {
+        "token": "10",
+        "offset": 4,
+        "completed": "10",
+        "places": [
+          1,
+          10
+        ],
+        "swaps": [
+          [
+            2,
+            3
+          ],
+          [
+            4,
+            5
+          ],
+          [
+            6,
+            7
+          ],
+          [
+            8,
+            9
+          ]
+        ],
+        "cross": false
+      },
+      {
+        "token": "x",
+        "offset": 3,
+        "completed": "x",
+        "places": [],
+        "swaps": [
+          [
+            1,
+            2
+          ],
+          [
+            3,
+            4
+          ],
+          [
+            5,
+            6
+          ],
+          [
+            7,
+            8
+          ],
+          [
+            9,
+            10
+          ]
+        ],
+        "cross": true
+      },
+      {
+        "token": "10",
+        "offset": 1,
+        "completed": "10",
+        "places": [
+          1,
+          10
+        ],
+        "swaps": [
+          [
+            2,
+            3
+          ],
+          [
+            4,
+            5
+          ],
+          [
+            6,
+            7
+          ],
+          [
+            8,
+            9
+          ]
+        ],
+        "cross": false
+      },
+      {
+        "token": "x",
+        "offset": 0,
+        "completed": "x",
+        "places": [],
+        "swaps": [
+          [
+            1,
+            2
+          ],
+          [
+            3,
+            4
+          ],
+          [
+            5,
+            6
+          ],
+          [
+            7,
+            8
+          ],
+          [
+            9,
+            10
+          ]
+        ],
+        "cross": true
+      },
+      {
+        "token": "12",
+        "offset": 16,
+        "completed": "12",
+        "places": [
+          1,
+          2
+        ],
+        "swaps": [
+          [
+            3,
+            4
+          ],
+          [
+            5,
+            6
+          ],
+          [
+            7,
+            8
+          ],
+          [
+            9,
+            10
+          ]
+        ],
+        "cross": false
+      }
+    ],
+    "lead_length": 20,
+    "lead_head": "1352749608",
+    "status": "ok",
+    "closed": true,
+    "period_leads": 9,
+    "period_rows": 180,
+    "rows_generated": 180,
+    "max_rows": 180,
+    "extent_rows": 3628800,
+    "hunt_bells": [
+      1
+    ],
+    "working_bells": [
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "truth": {
+      "true": true,
+      "conclusive": true,
+      "checked_rows": 180,
+      "first_repeat": null
+    },
+    "premature_rounds": null,
+    "overrides": [],
+    "problems": [],
+    "rows": [
+      {
+        "index": 0,
+        "lead": 0,
+        "change": 0,
+        "row": "1234567890",
+        "token": null,
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 1,
+        "lead": 1,
+        "change": 1,
+        "row": "2143658709",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 2,
+        "lead": 1,
+        "change": 2,
+        "row": "2416385079",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 3,
+        "lead": 1,
+        "change": 3,
+        "row": "4261830597",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 4,
+        "lead": 1,
+        "change": 4,
+        "row": "4628103957",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 5,
+        "lead": 1,
+        "change": 5,
+        "row": "6482019375",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 6,
+        "lead": 1,
+        "change": 6,
+        "row": "6840291735",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 7,
+        "lead": 1,
+        "change": 7,
+        "row": "8604927153",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 8,
+        "lead": 1,
+        "change": 8,
+        "row": "8069472513",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 9,
+        "lead": 1,
+        "change": 9,
+        "row": "0896745231",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 10,
+        "lead": 1,
+        "change": 10,
+        "row": "0987654321",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 11,
+        "lead": 1,
+        "change": 11,
+        "row": "9078563412",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 12,
+        "lead": 1,
+        "change": 12,
+        "row": "9705836142",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 13,
+        "lead": 1,
+        "change": 13,
+        "row": "7950381624",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 14,
+        "lead": 1,
+        "change": 14,
+        "row": "7593018264",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 15,
+        "lead": 1,
+        "change": 15,
+        "row": "5739102846",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 16,
+        "lead": 1,
+        "change": 16,
+        "row": "5371920486",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 17,
+        "lead": 1,
+        "change": 17,
+        "row": "3517294068",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 18,
+        "lead": 1,
+        "change": 18,
+        "row": "3152749608",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 19,
+        "lead": 1,
+        "change": 19,
+        "row": "1325476980",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 20,
+        "lead": 1,
+        "change": 20,
+        "row": "1352749608",
+        "token": "12",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 21,
+        "lead": 2,
+        "change": 1,
+        "row": "3125476980",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 22,
+        "lead": 2,
+        "change": 2,
+        "row": "3214567890",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 23,
+        "lead": 2,
+        "change": 3,
+        "row": "2341658709",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 24,
+        "lead": 2,
+        "change": 4,
+        "row": "2436185079",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 25,
+        "lead": 2,
+        "change": 5,
+        "row": "4263810597",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 26,
+        "lead": 2,
+        "change": 6,
+        "row": "4628301957",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 27,
+        "lead": 2,
+        "change": 7,
+        "row": "6482039175",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 28,
+        "lead": 2,
+        "change": 8,
+        "row": "6840293715",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 29,
+        "lead": 2,
+        "change": 9,
+        "row": "8604927351",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 30,
+        "lead": 2,
+        "change": 10,
+        "row": "8069472531",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 31,
+        "lead": 2,
+        "change": 11,
+        "row": "0896745213",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 32,
+        "lead": 2,
+        "change": 12,
+        "row": "0987654123",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 33,
+        "lead": 2,
+        "change": 13,
+        "row": "9078561432",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 34,
+        "lead": 2,
+        "change": 14,
+        "row": "9705816342",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 35,
+        "lead": 2,
+        "change": 15,
+        "row": "7950183624",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 36,
+        "lead": 2,
+        "change": 16,
+        "row": "7591038264",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 37,
+        "lead": 2,
+        "change": 17,
+        "row": "5719302846",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 38,
+        "lead": 2,
+        "change": 18,
+        "row": "5173920486",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 39,
+        "lead": 2,
+        "change": 19,
+        "row": "1537294068",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 40,
+        "lead": 2,
+        "change": 20,
+        "row": "1573920486",
+        "token": "12",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 41,
+        "lead": 3,
+        "change": 1,
+        "row": "5137294068",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 42,
+        "lead": 3,
+        "change": 2,
+        "row": "5312749608",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 43,
+        "lead": 3,
+        "change": 3,
+        "row": "3521476980",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 44,
+        "lead": 3,
+        "change": 4,
+        "row": "3254167890",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 45,
+        "lead": 3,
+        "change": 5,
+        "row": "2345618709",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 46,
+        "lead": 3,
+        "change": 6,
+        "row": "2436581079",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 47,
+        "lead": 3,
+        "change": 7,
+        "row": "4263850197",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 48,
+        "lead": 3,
+        "change": 8,
+        "row": "4628305917",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 49,
+        "lead": 3,
+        "change": 9,
+        "row": "6482039571",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 50,
+        "lead": 3,
+        "change": 10,
+        "row": "6840293751",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 51,
+        "lead": 3,
+        "change": 11,
+        "row": "8604927315",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 52,
+        "lead": 3,
+        "change": 12,
+        "row": "8069472135",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 53,
+        "lead": 3,
+        "change": 13,
+        "row": "0896741253",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 54,
+        "lead": 3,
+        "change": 14,
+        "row": "0987614523",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 55,
+        "lead": 3,
+        "change": 15,
+        "row": "9078165432",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 56,
+        "lead": 3,
+        "change": 16,
+        "row": "9701856342",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 57,
+        "lead": 3,
+        "change": 17,
+        "row": "7910583624",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 58,
+        "lead": 3,
+        "change": 18,
+        "row": "7195038264",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 59,
+        "lead": 3,
+        "change": 19,
+        "row": "1759302846",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 60,
+        "lead": 3,
+        "change": 20,
+        "row": "1795038264",
+        "token": "12",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 61,
+        "lead": 4,
+        "change": 1,
+        "row": "7159302846",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 62,
+        "lead": 4,
+        "change": 2,
+        "row": "7513920486",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 63,
+        "lead": 4,
+        "change": 3,
+        "row": "5731294068",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 64,
+        "lead": 4,
+        "change": 4,
+        "row": "5372149608",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 65,
+        "lead": 4,
+        "change": 5,
+        "row": "3527416980",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 66,
+        "lead": 4,
+        "change": 6,
+        "row": "3254761890",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 67,
+        "lead": 4,
+        "change": 7,
+        "row": "2345678109",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 68,
+        "lead": 4,
+        "change": 8,
+        "row": "2436587019",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 69,
+        "lead": 4,
+        "change": 9,
+        "row": "4263850791",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 70,
+        "lead": 4,
+        "change": 10,
+        "row": "4628305971",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 71,
+        "lead": 4,
+        "change": 11,
+        "row": "6482039517",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 72,
+        "lead": 4,
+        "change": 12,
+        "row": "6840293157",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 73,
+        "lead": 4,
+        "change": 13,
+        "row": "8604921375",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 74,
+        "lead": 4,
+        "change": 14,
+        "row": "8069412735",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 75,
+        "lead": 4,
+        "change": 15,
+        "row": "0896147253",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 76,
+        "lead": 4,
+        "change": 16,
+        "row": "0981674523",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 77,
+        "lead": 4,
+        "change": 17,
+        "row": "9018765432",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 78,
+        "lead": 4,
+        "change": 18,
+        "row": "9107856342",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 79,
+        "lead": 4,
+        "change": 19,
+        "row": "1970583624",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 80,
+        "lead": 4,
+        "change": 20,
+        "row": "1907856342",
+        "token": "12",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 81,
+        "lead": 5,
+        "change": 1,
+        "row": "9170583624",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 82,
+        "lead": 5,
+        "change": 2,
+        "row": "9715038264",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 83,
+        "lead": 5,
+        "change": 3,
+        "row": "7951302846",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 84,
+        "lead": 5,
+        "change": 4,
+        "row": "7593120486",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 85,
+        "lead": 5,
+        "change": 5,
+        "row": "5739214068",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 86,
+        "lead": 5,
+        "change": 6,
+        "row": "5372941608",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 87,
+        "lead": 5,
+        "change": 7,
+        "row": "3527496180",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 88,
+        "lead": 5,
+        "change": 8,
+        "row": "3254769810",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 89,
+        "lead": 5,
+        "change": 9,
+        "row": "2345678901",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 90,
+        "lead": 5,
+        "change": 10,
+        "row": "2436587091",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 91,
+        "lead": 5,
+        "change": 11,
+        "row": "4263850719",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 92,
+        "lead": 5,
+        "change": 12,
+        "row": "4628305179",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 93,
+        "lead": 5,
+        "change": 13,
+        "row": "6482031597",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 94,
+        "lead": 5,
+        "change": 14,
+        "row": "6840213957",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 95,
+        "lead": 5,
+        "change": 15,
+        "row": "8604129375",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 96,
+        "lead": 5,
+        "change": 16,
+        "row": "8061492735",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 97,
+        "lead": 5,
+        "change": 17,
+        "row": "0816947253",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 98,
+        "lead": 5,
+        "change": 18,
+        "row": "0189674523",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 99,
+        "lead": 5,
+        "change": 19,
+        "row": "1098765432",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 100,
+        "lead": 5,
+        "change": 20,
+        "row": "1089674523",
+        "token": "12",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 101,
+        "lead": 6,
+        "change": 1,
+        "row": "0198765432",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 102,
+        "lead": 6,
+        "change": 2,
+        "row": "0917856342",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 103,
+        "lead": 6,
+        "change": 3,
+        "row": "9071583624",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 104,
+        "lead": 6,
+        "change": 4,
+        "row": "9705138264",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 105,
+        "lead": 6,
+        "change": 5,
+        "row": "7950312846",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 106,
+        "lead": 6,
+        "change": 6,
+        "row": "7593021486",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 107,
+        "lead": 6,
+        "change": 7,
+        "row": "5739204168",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 108,
+        "lead": 6,
+        "change": 8,
+        "row": "5372940618",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 109,
+        "lead": 6,
+        "change": 9,
+        "row": "3527496081",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 110,
+        "lead": 6,
+        "change": 10,
+        "row": "3254769801",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 111,
+        "lead": 6,
+        "change": 11,
+        "row": "2345678910",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 112,
+        "lead": 6,
+        "change": 12,
+        "row": "2436587190",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 113,
+        "lead": 6,
+        "change": 13,
+        "row": "4263851709",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 114,
+        "lead": 6,
+        "change": 14,
+        "row": "4628315079",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 115,
+        "lead": 6,
+        "change": 15,
+        "row": "6482130597",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 116,
+        "lead": 6,
+        "change": 16,
+        "row": "6841203957",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 117,
+        "lead": 6,
+        "change": 17,
+        "row": "8614029375",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 118,
+        "lead": 6,
+        "change": 18,
+        "row": "8160492735",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 119,
+        "lead": 6,
+        "change": 19,
+        "row": "1806947253",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 120,
+        "lead": 6,
+        "change": 20,
+        "row": "1860492735",
+        "token": "12",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 121,
+        "lead": 7,
+        "change": 1,
+        "row": "8106947253",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 122,
+        "lead": 7,
+        "change": 2,
+        "row": "8019674523",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 123,
+        "lead": 7,
+        "change": 3,
+        "row": "0891765432",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 124,
+        "lead": 7,
+        "change": 4,
+        "row": "0987156342",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 125,
+        "lead": 7,
+        "change": 5,
+        "row": "9078513624",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 126,
+        "lead": 7,
+        "change": 6,
+        "row": "9705831264",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 127,
+        "lead": 7,
+        "change": 7,
+        "row": "7950382146",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 128,
+        "lead": 7,
+        "change": 8,
+        "row": "7593028416",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 129,
+        "lead": 7,
+        "change": 9,
+        "row": "5739204861",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 130,
+        "lead": 7,
+        "change": 10,
+        "row": "5372940681",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 131,
+        "lead": 7,
+        "change": 11,
+        "row": "3527496018",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 132,
+        "lead": 7,
+        "change": 12,
+        "row": "3254769108",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 133,
+        "lead": 7,
+        "change": 13,
+        "row": "2345671980",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 134,
+        "lead": 7,
+        "change": 14,
+        "row": "2436517890",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 135,
+        "lead": 7,
+        "change": 15,
+        "row": "4263158709",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 136,
+        "lead": 7,
+        "change": 16,
+        "row": "4621385079",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 137,
+        "lead": 7,
+        "change": 17,
+        "row": "6412830597",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 138,
+        "lead": 7,
+        "change": 18,
+        "row": "6148203957",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 139,
+        "lead": 7,
+        "change": 19,
+        "row": "1684029375",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 140,
+        "lead": 7,
+        "change": 20,
+        "row": "1648203957",
+        "token": "12",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 141,
+        "lead": 8,
+        "change": 1,
+        "row": "6184029375",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 142,
+        "lead": 8,
+        "change": 2,
+        "row": "6810492735",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 143,
+        "lead": 8,
+        "change": 3,
+        "row": "8601947253",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 144,
+        "lead": 8,
+        "change": 4,
+        "row": "8069174523",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 145,
+        "lead": 8,
+        "change": 5,
+        "row": "0896715432",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 146,
+        "lead": 8,
+        "change": 6,
+        "row": "0987651342",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 147,
+        "lead": 8,
+        "change": 7,
+        "row": "9078563124",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 148,
+        "lead": 8,
+        "change": 8,
+        "row": "9705836214",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 149,
+        "lead": 8,
+        "change": 9,
+        "row": "7950382641",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 150,
+        "lead": 8,
+        "change": 10,
+        "row": "7593028461",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 151,
+        "lead": 8,
+        "change": 11,
+        "row": "5739204816",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 152,
+        "lead": 8,
+        "change": 12,
+        "row": "5372940186",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 153,
+        "lead": 8,
+        "change": 13,
+        "row": "3527491068",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 154,
+        "lead": 8,
+        "change": 14,
+        "row": "3254719608",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 155,
+        "lead": 8,
+        "change": 15,
+        "row": "2345176980",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 156,
+        "lead": 8,
+        "change": 16,
+        "row": "2431567890",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 157,
+        "lead": 8,
+        "change": 17,
+        "row": "4213658709",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 158,
+        "lead": 8,
+        "change": 18,
+        "row": "4126385079",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 159,
+        "lead": 8,
+        "change": 19,
+        "row": "1462830597",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 160,
+        "lead": 8,
+        "change": 20,
+        "row": "1426385079",
+        "token": "12",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 161,
+        "lead": 9,
+        "change": 1,
+        "row": "4162830597",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 162,
+        "lead": 9,
+        "change": 2,
+        "row": "4618203957",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 163,
+        "lead": 9,
+        "change": 3,
+        "row": "6481029375",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 164,
+        "lead": 9,
+        "change": 4,
+        "row": "6840192735",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 165,
+        "lead": 9,
+        "change": 5,
+        "row": "8604917253",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 166,
+        "lead": 9,
+        "change": 6,
+        "row": "8069471523",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 167,
+        "lead": 9,
+        "change": 7,
+        "row": "0896745132",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 168,
+        "lead": 9,
+        "change": 8,
+        "row": "0987654312",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 169,
+        "lead": 9,
+        "change": 9,
+        "row": "9078563421",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 170,
+        "lead": 9,
+        "change": 10,
+        "row": "9705836241",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 171,
+        "lead": 9,
+        "change": 11,
+        "row": "7950382614",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 172,
+        "lead": 9,
+        "change": 12,
+        "row": "7593028164",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 173,
+        "lead": 9,
+        "change": 13,
+        "row": "5739201846",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 174,
+        "lead": 9,
+        "change": 14,
+        "row": "5372910486",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 175,
+        "lead": 9,
+        "change": 15,
+        "row": "3527194068",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 176,
+        "lead": 9,
+        "change": 16,
+        "row": "3251749608",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 177,
+        "lead": 9,
+        "change": 17,
+        "row": "2315476980",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 178,
+        "lead": 9,
+        "change": 18,
+        "row": "2134567890",
+        "token": "10",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 179,
+        "lead": 9,
+        "change": 19,
+        "row": "1243658709",
+        "token": "x",
+        "override": false,
+        "repeat": false
+      },
+      {
+        "index": 180,
+        "lead": 9,
+        "change": 20,
+        "row": "1234567890",
+        "token": "12",
+        "override": false,
+        "repeat": false
+      }
+    ]
+  }
+}

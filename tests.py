@@ -11,15 +11,23 @@ import urllib.error
 import urllib.request
 
 from db import Store
-from ringing import (NotationError, SplicedError, analyze, analyze_spliced,
-                     compare_reports, compare_touch_reports, parse_notation,
-                     parse_row, row_str)
+from ringing import (HARD_MAX_ROWS, LimitRequiredError, NotationError,
+                     SplicedError, analyze, analyze_spliced, compare_reports,
+                     compare_touch_reports, parse_notation, parse_row,
+                     row_str)
 from server import make_server
 
 # Plain Bob Minor: 12-change lead, lead head 135264, 5 leads = 60 rows, true.
 PB_MINOR = "x.16.x.16.x.16.x.16.x.16.x.12"
 # 14 at every lead end: 3 leads = 36 rows, lead head 123564, true.
 PB_MINOR_14 = "x.16.x.16.x.16.x.16.x.16.x.14"
+# Plain Bob Royal (10 bells): "10" means places 1 AND 10, 20-change lead,
+# lead head 1352749608, 9 leads = 180 rows, true.
+PB_ROYAL = "x10x10x10x10x10,12"
+# Plain Bob Maximus (12 bells): 24-change lead, 11 leads = 264 rows, true.
+PB_MAXIMUS = "x1Tx1Tx1Tx1Tx1Tx1T,12"
+ROUNDS_10 = "1234567890"
+ROUNDS_12 = "1234567890ET"
 
 
 def _seg(method_id, notation, leads, stage=6, name=None, version=1,
@@ -121,7 +129,7 @@ class ParseTests(unittest.TestCase):
         with self.assertRaises(NotationError):
             parse_notation("x", 3)
         with self.assertRaises(NotationError):
-            parse_notation("x", 9)
+            parse_notation("x", 13)
         with self.assertRaises(NotationError):
             parse_notation("", 6)
         with self.assertRaises(NotationError):
@@ -142,6 +150,235 @@ class ParseTests(unittest.TestCase):
             parse_row("112345", 6)
         with self.assertRaises(ValueError):
             parse_row("12345", 6)
+
+
+class StageTenTwelveParseTests(unittest.TestCase):
+    def test_royal_maximus_lead_notation(self):
+        ch = parse_notation(PB_ROYAL, 10)
+        self.assertEqual(len(ch), 20)
+        self.assertEqual([c.completed() for c in ch[:3]], ["x", "10", "x"])
+        self.assertEqual(ch[-1].completed(), "12")
+        ch = parse_notation(PB_MAXIMUS, 12)
+        self.assertEqual(len(ch), 24)
+        self.assertEqual(ch[1].completed(), "1T")
+        # completion fills inferable end places with the right symbols
+        self.assertEqual(completed_sequence("3", 12), ["3T"])
+        self.assertEqual(completed_sequence("E", 12), ["ET"])
+        self.assertEqual(completed_sequence("12E", 12), ["12ET"])
+        self.assertEqual(completed_sequence("3", 10), ["30"])
+        (cx,) = parse_notation("x", 12)
+        self.assertEqual(cx.swaps, tuple((i, i + 1) for i in range(1, 12, 2)))
+
+    def test_token_10_is_places_1_and_10(self):
+        # the crucial rule: "10" is two single-symbol places, never ten
+        (c,) = parse_notation("10", 12)
+        self.assertEqual(sorted(c.places), [1, 10])
+        self.assertEqual(c.completed(), "10")
+        self.assertEqual(c.swaps, ((2, 3), (4, 5), (6, 7), (8, 9), (11, 12)))
+        # the bare symbol 0 alone means place 10, which completes to 10 too
+        (c0,) = parse_notation("0", 12)
+        self.assertEqual(sorted(c0.places), [1, 10])
+        # E alone on 12 completes to ET; on 11 "12E" leaves places 1,2,11
+        (ce,) = parse_notation("12E", 11)
+        self.assertEqual(sorted(ce.places), [1, 2, 11])
+        self.assertEqual(ce.completed(), "12E")
+        # bell-12 symbol T out of range on 10 bells is located
+        with self.assertRaises(NotationError) as ctx:
+            parse_notation("x.1T", 10)
+        self.assertEqual(ctx.exception.token, "1T")
+        self.assertEqual(ctx.exception.offset, 2)
+        with self.assertRaises(NotationError):
+            parse_notation("E", 10)
+
+    def test_symbol_rendering(self):
+        self.assertEqual(row_str(tuple(range(1, 13))), "1234567890ET")
+        self.assertEqual(row_str(tuple(range(1, 11))), "1234567890")
+        self.assertEqual(row_str((1, 3, 5, 2, 7, 4, 9, 6, 10, 8)),
+                         "1352749608")
+        self.assertEqual(row_str((1, 3, 5, 2, 7, 4, 9, 6, 11, 8, 12, 10)),
+                         "13527496E8T0")
+
+    def test_row_input_forms(self):
+        rounds = tuple(range(1, 13))
+        # compact symbols
+        self.assertEqual(parse_row(ROUNDS_12, 12), rounds)
+        # separated symbols AND plain multi-digit integers
+        self.assertEqual(parse_row("1,2,3,4,5,6,7,8,9,0,E,T", 12), rounds)
+        self.assertEqual(parse_row("1 2 3 4 5 6 7 8 9 10 11 12", 12), rounds)
+        # arrays stay integer-only
+        self.assertEqual(parse_row(list(range(1, 13)), 12), rounds)
+        self.assertEqual(parse_row(None, 10), tuple(range(1, 11)))
+        self.assertEqual(parse_row(ROUNDS_10, 10), tuple(range(1, 11)))
+
+    def test_compact_row_duplicate_located(self):
+        with self.assertRaises(NotationError) as ctx:
+            parse_row("1234567890EE", 12)
+        self.assertEqual(ctx.exception.token, "E")
+        self.assertEqual(ctx.exception.offset, 11)
+        with self.assertRaises(NotationError) as ctx:
+            parse_row("12345678900E", 12)  # bell 10 repeated, T missing
+        self.assertEqual((ctx.exception.token, ctx.exception.offset), ("0", 10))
+        self.assertIn("appears more than once", ctx.exception.message)
+
+    def test_compact_row_missing_located(self):
+        with self.assertRaises(NotationError) as ctx:
+            parse_row("1234567890E", 12)  # 11 bells: T missing
+        self.assertEqual(ctx.exception.token, "1234567890E")
+        self.assertEqual(ctx.exception.offset, 11)
+        self.assertIn("missing", ctx.exception.message)
+        with self.assertRaises(NotationError) as ctx:
+            parse_row("123456789EET", 12)  # 13 chars: bell E repeated, 0 missing
+        # duplicate check runs before the length check, pointing at 2nd E
+        self.assertEqual((ctx.exception.token, ctx.exception.offset), ("E", 10))
+        # the separated form accepts 10/11/12 as integers; a 13-token row
+        # trips the length check before the duplicate check
+        with self.assertRaises(NotationError) as ctx:
+            parse_row("1 2 3 4 5 6 7 8 9 10 11 12 1", 12)
+        self.assertEqual(ctx.exception.offset, 13)
+        # a 12-token permutation with a duplicate gets the symbol location
+        with self.assertRaises(NotationError) as ctx:
+            parse_row("1 2 3 4 5 6 7 8 9 10 11 1", 12)
+        self.assertEqual((ctx.exception.token, ctx.exception.offset), ("1", 24))
+        with self.assertRaises(NotationError) as ctx:
+            parse_row([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 5], 12)
+        self.assertEqual((ctx.exception.token, ctx.exception.offset), (5, 11))
+
+    def test_row_illegal_symbol_located(self):
+        with self.assertRaises(NotationError) as ctx:
+            parse_row("1234567890T", 11)  # T (bell 12) out of stage
+        self.assertEqual((ctx.exception.token, ctx.exception.offset), ("T", 10))
+        with self.assertRaises(NotationError) as ctx:
+            parse_row("1234567890EX", 12)
+        self.assertEqual((ctx.exception.token, ctx.exception.offset), ("X", 11))
+        # separated token form keeps the source offset
+        with self.assertRaises(NotationError) as ctx:
+            parse_row("1, 2, z, 4", 4)
+        self.assertEqual((ctx.exception.token, ctx.exception.offset), ("z", 6))
+
+    def test_array_row_errors_located(self):
+        with self.assertRaises(NotationError) as ctx:
+            parse_row([1, 2, 2, 4], 4)  # duplicate
+        self.assertEqual((ctx.exception.token, ctx.exception.offset), (2, 2))
+        with self.assertRaises(NotationError) as ctx:
+            parse_row([1, 2, 3, 13], 12)  # out of stage
+        self.assertEqual((ctx.exception.token, ctx.exception.offset), (13, 3))
+        with self.assertRaises(NotationError) as ctx:
+            parse_row([1, 2, "3", 4], 4)  # strings rejected: integer-only
+        self.assertEqual(ctx.exception.offset, 2)
+        with self.assertRaises(NotationError):
+            parse_row([1, 2, 3], 4)  # missing bell 4
+
+
+class StageTenTwelveAnalyzeTests(unittest.TestCase):
+    def test_plain_bob_royal_course(self):
+        rep = analyze(10, PB_ROYAL, max_rows=100000)
+        self.assertEqual(rep["status"], "ok")
+        self.assertEqual(rep["lead_length"], 20)
+        self.assertEqual(rep["lead_head"], "1352749608")
+        self.assertEqual(rep["period_leads"], 9)
+        self.assertEqual(rep["period_rows"], 180)
+        self.assertEqual(rep["hunt_bells"], [1])
+        self.assertTrue(rep["truth"]["true"])
+        self.assertTrue(rep["truth"]["conclusive"])
+        # symbols flow through every row entry and the closing row
+        self.assertEqual(rep["rows"][0]["row"], ROUNDS_10)
+        self.assertTrue(all(set(r["row"]) <= set("1234567890")
+                            for r in rep["rows"]))
+
+    def test_plain_bob_maximus_course(self):
+        rep = analyze(12, PB_MAXIMUS, max_rows=100000)
+        self.assertEqual(rep["status"], "ok")
+        self.assertEqual(rep["lead_length"], 24)
+        self.assertEqual(rep["lead_head"], "13527496E8T0")
+        self.assertEqual(rep["period_rows"], 264)
+        self.assertEqual(rep["hunt_bells"], [1])
+        self.assertTrue(rep["truth"]["true"])
+        self.assertEqual(rep["rows"][0]["row"], ROUNDS_12)
+        self.assertEqual(rep["rows"][-1]["row"], ROUNDS_12)
+
+    def test_extent_above_hard_cap_requires_explicit_max_rows(self):
+        for stage in (10, 11, 12):
+            with self.assertRaises(LimitRequiredError) as ctx:
+                analyze(stage, "x" if stage % 2 == 0
+                        else "3.1.5.1.7.1.9.1.E.1.01")
+            err = ctx.exception
+            self.assertEqual(err.stage, stage)
+            self.assertGreater(err.extent_rows, HARD_MAX_ROWS)
+            self.assertIn("explicit max_rows", err.message)
+        # stages 4-8 still default to the extent without a cap
+        rep = analyze(6, PB_MINOR)
+        self.assertEqual(rep["max_rows"], 720)
+
+    def test_explicit_cap_over_hard_limit_rejected(self):
+        with self.assertRaises(ValueError):
+            analyze(10, PB_ROYAL, max_rows=HARD_MAX_ROWS + 1)
+        with self.assertRaises(ValueError):
+            analyze(12, PB_MAXIMUS, max_rows=10**9)
+
+    def test_capped_without_repeat_is_inconclusive(self):
+        # stop after 240 checked rows (10 Maximus leads), before any repeat
+        rep = analyze(12, PB_MAXIMUS, max_rows=240)
+        self.assertEqual(rep["status"], "exceeded_limit")
+        self.assertFalse(rep["closed"])
+        self.assertIsNone(rep["truth"]["true"])        # NOT a true verdict
+        self.assertFalse(rep["truth"]["conclusive"])
+        self.assertIsNone(rep["truth"]["first_repeat"])
+        self.assertEqual(rep["truth"]["checked_rows"], 240)
+        self.assertEqual(rep["rows_generated"], 240)
+        self.assertEqual(rep["problems"],
+                         ["exceeded_limit", "not_closed", "truth_inconclusive"])
+        self.assertIsNone(rep["period_rows"])
+
+    def test_capped_but_repeat_found_is_untrue_conclusive(self):
+        # Plain Bob Maximus closes at 264 rows; with a 300-row cap the full
+        # true course is reached normally - sanity for the conclusive branch
+        rep = analyze(12, PB_MAXIMUS, max_rows=300)
+        self.assertEqual(rep["status"], "ok")
+        self.assertTrue(rep["truth"]["conclusive"])
+        self.assertTrue(rep["truth"]["true"])
+
+    def test_spliced_requires_cap_at_stage_12(self):
+        seg = {"method_id": 1, "name": "M1", "version": 1, "stage": 12,
+               "notation": PB_MAXIMUS, "leads": 1, "overrides": []}
+        with self.assertRaises(LimitRequiredError):
+            analyze_spliced([seg])
+        rep = analyze_spliced([seg], max_rows=1000)
+        self.assertEqual(rep["total_rows"], 24)
+        self.assertTrue(rep["truth"]["conclusive"])
+        self.assertEqual(rep["rows"][0]["row"], ROUNDS_12)
+
+    def test_spliced_switch_trajectory_in_symbols(self):
+        # two Maximus-style methods spliced lead-to-lead: switch rows and
+        # every row entry stay in canonical 0/E/T symbols
+        alt = "x12x12x12x12x12x12,1T"
+        segs = [
+            {"method_id": 1, "name": "Maximus", "version": 1, "stage": 12,
+             "notation": PB_MAXIMUS, "leads": 1, "overrides": []},
+            {"method_id": 2, "name": "MaxAlt", "version": 1, "stage": 12,
+             "notation": alt, "leads": 1, "overrides": []},
+        ]
+        rep = analyze_spliced(segs, max_rows=1000)
+        self.assertEqual(rep["total_rows"], 48)
+        (sw,) = rep["switches"]
+        self.assertEqual(sw["at_index"], 24)
+        # lead head after one Maximus lead, rendered with E/T
+        self.assertEqual(sw["before_row"], "13527496E8T0")
+        self.assertEqual(sw["from_method"], "Maximus")
+        self.assertEqual(sw["to_method"], "MaxAlt")
+        self.assertEqual(sw["after_row"], rep["rows"][25]["row"])
+        self.assertEqual(rep["rows"][25]["segment"], 2)
+        alphabet = set("1234567890ET")
+        self.assertTrue(all(set(r["row"]) <= alphabet for r in rep["rows"]))
+        self.assertTrue(rep["truth"]["conclusive"])
+
+    def test_compare_inconclusive_truth_is_null(self):
+        capped = analyze(12, PB_MAXIMUS, max_rows=240)   # inconclusive
+        closed = analyze(12, PB_MAXIMUS, max_rows=1000)  # ok, true
+        cmp = compare_reports(closed, capped)
+        self.assertTrue(cmp["a"]["truth"]["true"])
+        self.assertIsNone(cmp["b"]["truth"]["true"])
+        self.assertFalse(cmp["b"]["truth"]["conclusive"])
+        self.assertIsNone(cmp["both_true"])
 
 
 class AnalyzeTests(unittest.TestCase):
@@ -602,7 +839,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(out["code"], "notation_error")
         self.assertEqual(out["token"], "19")
         status, out = self.call("POST", "/api/methods",
-                                {"name": "Bad", "stage": 9, "notation": "x"},
+                                {"name": "Bad", "stage": 13, "notation": "x"},
                                 expect=400)
         self.assertIn("stage", out["error"])
         status, out = self.call("GET", "/api/methods/9999", expect=404)
@@ -748,6 +985,119 @@ class ApiTests(unittest.TestCase):
         # none of the failed touches was stored
         status, after = self.call("GET", "/api/touches")
         self.assertEqual(len(after["touches"]), n_before)
+
+    def test_10_royal_and_maximus_flow(self):
+        # Plain Bob Royal (10 bells): "10" is places 1 and 10
+        status, m10 = self.call("POST", "/api/methods",
+                                {"name": "Plain Bob Royal", "stage": 10,
+                                 "notation": PB_ROYAL, "start_row": ROUNDS_10})
+        self.assertEqual(status, 201)
+        self.assertEqual(m10["lead_length"], 20)
+        self.assertEqual(m10["changes"][1]["completed"], "10")
+        self.assertEqual(m10["changes"][1]["places"], [1, 10])
+        # without max_rows the job is refused: 10! > 1,000,000
+        status, out = self.call("POST", "/api/analyses",
+                                {"method_id": m10["id"]}, expect=400)
+        self.assertEqual(out["code"], "limit_required")
+        self.assertEqual(out["stage"], 10)
+        self.assertEqual(out["extent_rows"], 3628800)
+        self.assertEqual(out["hard_max_rows"], HARD_MAX_ROWS)
+        # explicit cap within the hard limit runs the whole true course
+        status, a10 = self.call("POST", "/api/analyses",
+                                {"method_id": m10["id"], "max_rows": 100000})
+        self.assertEqual(status, 201)
+        self.assertEqual(a10["status"], "ok")
+        self.assertEqual(a10["period_rows"], 180)
+        self.assertEqual(a10["lead_head"], "1352749608")
+        self.assertTrue(a10["truth"]["true"])
+        # rows are compact symbols with 0 for bell 10
+        status, rows = self.call("GET",
+                                 f"/api/analyses/{a10['id']}/rows?from=0&to=1")
+        self.assertEqual(rows["rows"][0]["row"], ROUNDS_10)
+        # an explicit cap over the hard limit is rejected at the API
+        status, out = self.call("POST", "/api/analyses",
+                                {"method_id": m10["id"],
+                                 "max_rows": HARD_MAX_ROWS + 1}, expect=400)
+        self.assertIn(str(HARD_MAX_ROWS), out["error"])
+
+        # Plain Bob Maximus (12 bells): T for bell 12
+        status, m12 = self.call("POST", "/api/methods",
+                                {"name": "Plain Bob Maximus", "stage": 12,
+                                 "notation": PB_MAXIMUS})
+        self.assertEqual(status, 201)
+        self.assertEqual(m12["lead_length"], 24)
+        self.assertEqual(m12["changes"][1]["completed"], "1T")
+        # capped at 240 rows: not closed and truth is inconclusive only
+        status, a12 = self.call("POST", "/api/analyses",
+                                {"method_id": m12["id"], "max_rows": 240})
+        self.assertEqual(status, 201)
+        self.assertEqual(a12["status"], "exceeded_limit")
+        self.assertFalse(a12["closed"])
+        self.assertIsNone(a12["truth"]["true"])
+        self.assertFalse(a12["truth"]["conclusive"])
+        self.assertEqual(a12["truth"]["checked_rows"], 240)
+        self.assertIn("truth_inconclusive", a12["problems"])
+        self.assertEqual(a12["rows_generated"], 240)
+        status, full = self.call("GET", f"/api/analyses/{a12['id']}")
+        self.assertEqual(full["report"]["start_row"], ROUNDS_12)
+        # full course with a cap high enough closes at 264 rows and is true
+        status, a12b = self.call("POST", "/api/analyses",
+                                 {"method_id": m12["id"], "max_rows": 1000})
+        self.assertEqual(a12b["status"], "ok")
+        self.assertEqual(a12b["period_rows"], 264)
+        self.assertEqual(a12b["lead_head"], "13527496E8T0")
+        self.assertTrue(a12b["truth"]["true"])
+
+    def test_11_stage12_row_and_notation_errors(self):
+        # duplicate bell in a compact row is located to the original symbol
+        status, out = self.call("POST", "/api/methods",
+                                {"name": "Bad Row", "stage": 12, "notation": "x",
+                                 "start_row": "1234567890EE"}, expect=400)
+        self.assertEqual(out["code"], "notation_error")
+        self.assertEqual(out["token"], "E")
+        self.assertEqual(out["offset"], 11)
+        # missing bell (wrong length) likewise keeps token + offset
+        status, out = self.call("POST", "/api/methods",
+                                {"name": "Bad Row", "stage": 12, "notation": "x",
+                                 "start_row": "1234567890E"}, expect=400)
+        self.assertEqual(out["offset"], 11)
+        self.assertIn("missing", out["error"])
+        # place out of range on 10 bells (T = 12) keeps token + offset
+        status, out = self.call("POST", "/api/parse",
+                                {"stage": 10, "notation": "x.1T"}, expect=400)
+        self.assertEqual(out["token"], "1T")
+        self.assertEqual(out["offset"], 2)
+        # parse endpoint normalizes every accepted start_row form
+        for form in (ROUNDS_12, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+                     "1 2 3 4 5 6 7 8 9 10 11 12",
+                     "1,2,3,4,5,6,7,8,9,0,E,T"):
+            status, out = self.call("POST", "/api/parse",
+                                    {"stage": 12, "notation": "x",
+                                     "start_row": form})
+            self.assertEqual(out["start_row"], ROUNDS_12, form)
+        # spliced touch on 12 bells also needs the explicit cap
+        status, m12 = self.call("POST", "/api/methods",
+                                {"name": "Maximus for touch", "stage": 12,
+                                 "notation": PB_MAXIMUS})
+        status, out = self.call("POST", "/api/touches",
+                                {"segments": [{"method_id": m12["id"],
+                                               "leads": 1}]}, expect=400)
+        self.assertEqual(out["code"], "limit_required")
+        self.assertEqual(out["stage"], 12)
+        status, t = self.call("POST", "/api/touches",
+                              {"segments": [{"method_id": m12["id"], "leads": 1}],
+                               "max_rows": 1000})
+        self.assertEqual(status, 201)
+        self.assertEqual(t["total_rows"], 24)
+        status, full = self.call("GET", f"/api/touches/{t['id']}")
+        self.assertEqual(full["report"]["rows"][0]["row"], ROUNDS_12)
+        self.assertEqual(full["report"]["switches"], [])
+
+    def test_12_api_index_advertises_stages(self):
+        status, idx = self.call("GET", "/api")
+        self.assertEqual(idx["max_stage"], 12)
+        self.assertEqual(idx["hard_max_rows"], HARD_MAX_ROWS)
+        self.assertEqual(idx["bell_symbols"], {"10": "0", "11": "E", "12": "T"})
 
 
 if __name__ == "__main__":

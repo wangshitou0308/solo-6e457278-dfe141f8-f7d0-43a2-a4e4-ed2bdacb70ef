@@ -3,9 +3,19 @@ analysis and spliced-touch composition.
 
 Only Python's standard library is used so the whole API works offline.
 
-Place-notation syntax (4-8 bells):
+Stages: 4-12 bells.  Above bell 9 the single-character royal/maximus symbols
+are used everywhere a row or place is rendered compactly:
+    bell 10 -> '0',  bell 11 -> 'E',  bell 12 -> 'T'
+so rounds on 12 bells is "1234567890ET".  These are *single* symbols: in place
+notation "10" means places 1 AND 10, never the two-digit number ten; to name
+bell 10 on its own write "0".  Array input still uses plain integers
+([1, ..., 10, 11, 12]); separated string input ("1,2,...,10,11,12") accepts
+both the integers 10/11/12 and the symbols 0/E/T.
+
+Place-notation syntax (4-12 bells):
     x / X / -   a cross change (all adjacent pairs swap), no places made
-    1..8        places made; each digit is one place, e.g. "16" or "1256"
+    1..9 0 E T  places made; each character is one place, e.g. "16", "1256",
+                "10" (places 1 and 10), "1T" (places 1 and 12)
     .           separates changes (optional around x/-); whitespace ignored
     ,           symmetric expansion: "a,b" -> a + reverse(a[:-1]) + b, i.e.
                 the last change of a is the half-lead pivot (mirrored, not
@@ -15,29 +25,38 @@ Place-notation syntax (4-8 bells):
 For every change, lead/lie places that can be inferred from the stage are
 completed first (e.g. "3" on 6 bells becomes "36"); every remaining position
 must then pair up as an adjacent swap.  Errors (illegal character, place out
-of range, duplicate place, unpairable places) are reported against the
-original token and are never silently corrected.
+of range, duplicate place, unpairable places; a row that is not a permutation)
+are reported against the original token and offset, never silently corrected.
 """
 
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass
 
 MIN_STAGE = 4
-MAX_STAGE = 8
-CROSS_CHARS = "xX-"
-PLACE_CHARS = "123456789"
+MAX_STAGE = 12
 HARD_MAX_ROWS = 1_000_000
+CROSS_CHARS = "xX-"
+# index i is the canonical symbol for bell i+1: 1..9, 0 (10), E (11), T (12)
+BELL_SYMBOLS = "1234567890ET"
+PLACE_CHARS = BELL_SYMBOLS
+SYMBOL_TO_BELL = {ch: i + 1 for i, ch in enumerate(BELL_SYMBOLS)}
+# 10! = 3,628,800 already exceeds the hard cap, so stages 10-12 need an
+# explicit max_rows before any job can be created.
+EXTENT_LIMIT_STAGE = next(n for n in range(MIN_STAGE, MAX_STAGE + 1)
+                          if math.factorial(n) > HARD_MAX_ROWS)
 
 
 class NotationError(ValueError):
-    """A place-notation error, located to the original token.
+    """A place-notation or row error, located to the original token.
 
     Attributes:
         message: human readable description
-        token:   the offending token copied verbatim from the notation
-        offset:  0-based character offset of the token in the notation string
+        token:   the offending token copied verbatim from the input
+        offset:  0-based character offset (notation/row strings) or element
+                 index (array rows / token lists) of the token
     """
 
     def __init__(self, message, token=None, offset=None):
@@ -53,6 +72,27 @@ class NotationError(ValueError):
         if self.offset is not None:
             out["offset"] = self.offset
         return out
+
+
+class LimitRequiredError(ValueError):
+    """The default cap (stage! rows) exceeds the hard cap, so an explicit
+    max_rows is required before the job can be created."""
+
+    def __init__(self, stage, limit):
+        message = (
+            f"stage {stage}: one extent is {limit:,} rows which exceeds the "
+            f"hard limit of {HARD_MAX_ROWS:,}; pass an explicit max_rows "
+            f"(1..{HARD_MAX_ROWS:,}) to create the job anyway - truth can then "
+            f"only be judged over the rows actually checked")
+        super().__init__(message)
+        self.message = message
+        self.stage = stage
+        self.extent_rows = limit
+        self.hard_max_rows = HARD_MAX_ROWS
+
+    def to_dict(self):
+        return {"error": self.message, "stage": self.stage,
+                "extent_rows": self.extent_rows, "hard_max_rows": HARD_MAX_ROWS}
 
 
 class SplicedError(ValueError):
@@ -83,12 +123,36 @@ class SplicedError(ValueError):
 
 
 def check_stage(stage):
-    """Validate the number of bells (4-8)."""
+    """Validate the number of bells (4-12)."""
     if isinstance(stage, bool) or not isinstance(stage, int):
         raise NotationError("stage must be an integer")
     if not MIN_STAGE <= stage <= MAX_STAGE:
         raise NotationError(
             f"stage must be between {MIN_STAGE} and {MAX_STAGE} bells, got {stage}")
+
+
+def bell_symbol(bell):
+    """Canonical compact symbol for one bell number: 1..9, 0, E, T."""
+    return BELL_SYMBOLS[bell - 1]
+
+
+def validate_max_rows(stage, max_rows):
+    """Resolve a requested row cap against the stage.
+
+    No cap given and the extent (stage!) within the hard limit -> the extent.
+    No cap given above the hard limit -> LimitRequiredError (no job).
+    An explicit cap must be an int in 1..HARD_MAX_ROWS.
+    """
+    extent = math.factorial(stage)
+    if max_rows is None:
+        if extent > HARD_MAX_ROWS:
+            raise LimitRequiredError(stage, extent)
+        return extent
+    if isinstance(max_rows, bool) or not isinstance(max_rows, int) or max_rows < 1:
+        raise ValueError("max_rows must be a positive integer")
+    if max_rows > HARD_MAX_ROWS:
+        raise ValueError(f"max_rows may not exceed {HARD_MAX_ROWS}")
+    return max_rows
 
 
 @dataclass(frozen=True)
@@ -108,10 +172,10 @@ class Change:
         return tuple(row)
 
     def completed(self):
-        """Canonical notation after place completion, e.g. 'x' or '16'."""
+        """Canonical notation after place completion, e.g. 'x' or '10'."""
         if self.cross:
             return "x"
-        return "".join(str(p) for p in sorted(self.places))
+        return "".join(bell_symbol(p) for p in sorted(self.places))
 
     def to_dict(self):
         return {
@@ -154,7 +218,7 @@ def _build_change(token, offset, stage):
     else:
         places = set()
         for ch in token:
-            place = int(ch)
+            place = SYMBOL_TO_BELL[ch]
             if place < 1 or place > stage:
                 raise NotationError(
                     f"place {place} out of range for {stage} bells",
@@ -223,39 +287,124 @@ def parse_notation(notation, stage):
     return [_build_change(token, offset, stage) for token, offset in raw]
 
 
-def parse_row(value, stage):
-    """Normalize a row given as '123456', '1,2,3,4,5,6' or [1,2,3,4,5,6].
+def _decode_bell_token(token):
+    """Decode one row token: '1'..'9','0','E','T' or '10','11','12'.
 
-    Defaults to rounds.  Must be a permutation of 1..stage.
+    Returns the bell number or None for an illegal token.
     """
+    if len(token) == 1:
+        return SYMBOL_TO_BELL.get(token)
+    # separated input only: multi-character tokens must be the plain
+    # integers 10/11/12 (compact rows never contain a multi-char token)
+    if token.isdigit():
+        value = int(token)
+        if 10 <= value <= 12:
+            return value
+    return None
+
+
+def parse_row(value, stage):
+    """Normalize a row to a tuple of bell integers 1..stage.
+
+    Accepted forms (all describe the same permutation):
+      None                 -> rounds
+      [1, 2, ..., 12]      -> array of integers (the only form for bells > 9
+                             that does not use symbols)
+      "1234567890ET"       -> compact row: one symbol per bell, bells 10/11/12
+                             written 0/E/T
+      "1,2,...,10,11,12"   -> separated tokens; integers 10/11/12 and the
+                             symbols 0/E/T are both accepted
+
+    Must be a permutation of 1..stage.  Illegal symbols, duplicates, bells
+    out of stage and missing bells are reported as NotationError against the
+    original token and its offset (character offset in strings, element index
+    in arrays); nothing is silently corrected.
+    """
+    check_stage(stage)
     if value is None:
         return tuple(range(1, stage + 1))
+    # pieces: parallel list of (bell, original_token, offset) for error reports
+    pieces = []
+    token_text = None
     if isinstance(value, (list, tuple)):
-        try:
-            row = tuple(int(v) for v in value)
-        except (TypeError, ValueError):
-            raise ValueError("start_row must contain bell numbers")
+        # array input stays integer-only: each element is one bell number
+        for i, v in enumerate(value):
+            if isinstance(v, bool) or not isinstance(v, int) \
+                    or not 1 <= v <= stage:
+                raise NotationError(
+                    f"invalid bell {v!r} for {stage} bells "
+                    f"(array rows use integer bell numbers 1..{stage})",
+                    token=v, offset=i)
+            pieces.append((v, v, i))
+        token_text = "[" + ",".join(str(p[0]) for p in pieces) + "]"
     elif isinstance(value, str):
         text = value.replace(",", " ").replace(".", " ").strip()
-        if " " in text:
-            try:
-                row = tuple(int(p) for p in text.split())
-            except ValueError:
-                raise ValueError(f"invalid start_row {value!r}")
+        if not text:
+            raise NotationError("start_row must not be empty",
+                                token=value, offset=0)
+        token_text = value
+        compact = not any(c.isspace() for c in text)
+        if compact:
+            # compact row: each single character is one bell symbol
+            for i, ch in enumerate(text):
+                bell = SYMBOL_TO_BELL.get(ch)
+                if bell is None or bell > stage:
+                    raise NotationError(
+                        f"invalid bell symbol {ch!r} for {stage} bells "
+                        f"(bells above 9 are written 0=10, E=11, T=12)",
+                        token=ch, offset=i)
+                pieces.append((bell, ch, i))
         else:
-            if not text or any(c not in PLACE_CHARS for c in text):
-                raise ValueError(f"invalid start_row {value!r}")
-            row = tuple(int(c) for c in text)
+            # separated tokens: plain integers 10/11/12 or single symbols
+            search_from = 0
+            for tok in text.split():
+                pos = value.find(tok, search_from)
+                search_from = pos + len(tok)
+                bell = _decode_bell_token(tok)
+                if bell is None or bell > stage:
+                    raise NotationError(
+                        f"invalid bell token {tok!r} for {stage} bells",
+                        token=tok, offset=pos)
+                pieces.append((bell, tok, pos))
     else:
         raise ValueError("start_row must be a string or a list of bells")
-    if sorted(row) != list(range(1, stage + 1)):
-        raise ValueError(f"start_row must be a permutation of 1..{stage}")
-    return row
+
+    if len(pieces) != stage:
+        present = {bell for bell, _, _ in pieces}
+        missing = [b for b in range(1, stage + 1) if b not in present]
+        extras = sorted(bell for bell in present if bell > stage)
+        detail = ""
+        if missing:
+            detail += ": missing bell(s) " + "".join(bell_symbol(b) for b in missing)
+        if extras:
+            detail += "; bell(s) out of stage: " + ",".join(map(str, extras))
+        raise NotationError(
+            f"row has {len(pieces)} bells, expected {stage} "
+            f"(each bell 1..{stage} exactly once){detail}",
+            token=token_text, offset=len(pieces))
+    seen = set()
+    for bell, token, offset in pieces:
+        if bell in seen:
+            raise NotationError(
+                f"bell {bell} appears more than once in the row",
+                token=token, offset=offset)
+        seen.add(bell)
+    missing = [b for b in range(1, stage + 1) if b not in seen]
+    if missing:
+        raise NotationError(
+            f"row is not a permutation of 1..{stage}: missing bell(s) "
+            + "".join(bell_symbol(b) for b in missing),
+            token=token_text, offset=len(pieces))
+    return tuple(bell for bell, _, _ in pieces)
 
 
 def row_str(row):
-    """Render a row tuple as a string, e.g. (1,3,5,2,6,4) -> '135264'."""
-    return "".join(str(b) for b in row)
+    """Render a row tuple in canonical compact symbols.
+
+    Bells 1..9 are themselves, bell 10 is '0', bell 11 'E', bell 12 'T',
+    e.g. (1..12) -> '1234567890ET'.
+    """
+    return "".join(bell_symbol(b) for b in row)
 
 
 def _locate(index, lead_len):
@@ -268,7 +417,7 @@ def _locate(index, lead_len):
 
 
 def analyze(stage, notation, start_row=None, overrides=None, max_rows=None):
-    """Expand a method lead by lead and check its truth within one extent.
+    """Expand a method lead by lead and check its truth up to the row cap.
 
     The first repeated row (a premature return to the start row mid-lead
     counts as a repeat of row 0) is recorded with both positions, but the
@@ -279,20 +428,24 @@ def analyze(stage, notation, start_row=None, overrides=None, max_rows=None):
     overrides: list of {"lead": L, "change": K, "notation": "14"} replacing
         change K of lead L by a parsed single-change notation (a "call").
     max_rows:  safety cap on generated rows; defaults to one extent (stage!).
+        On stages 10-12 the extent exceeds the hard limit, so omitting the cap
+        raises LimitRequiredError and an explicit value <= the hard limit is
+        mandatory.
+
+    If the cap stops an expansion that had not repeated and had not closed,
+    truth is reported as inconclusive ("truth.true" is null) rather than
+    "true": only the checked range is claimed.
 
     Returns a report dict.  Raises NotationError / ValueError on bad input.
-    """
+"""
     check_stage(stage)
     changes = parse_notation(notation, stage)
     start = parse_row(start_row, stage)
     lead_len = len(changes)
     extent = math.factorial(stage)
-    if max_rows is None:
-        max_rows = extent
-    if isinstance(max_rows, bool) or not isinstance(max_rows, int) or max_rows < 1:
-        raise ValueError("max_rows must be a positive integer")
-    if max_rows > HARD_MAX_ROWS:
-        raise ValueError(f"max_rows may not exceed {HARD_MAX_ROWS}")
+    # No cap given: default to one extent; when the extent is above the hard
+    # limit (stages 10-12) an explicit cap is required to create the job.
+    max_rows = validate_max_rows(stage, max_rows)
 
     # Composition overrides: {(lead, change_index): Change}
     override_map = {}
@@ -376,6 +529,11 @@ def analyze(stage, notation, start_row=None, overrides=None, max_rows=None):
     if lead_head is not None:
         hunt_bells = [b for b in range(1, stage + 1)
                       if lead_head.index(b) == start.index(b)]
+    # Truth can be decided over the rows actually checked only when either a
+    # repeat was found (untrue) or the course closed (every row of the cycle
+    # was seen).  If the cap stopped an as-yet-unrepeated expansion, no full
+    # truth conclusion is possible: we report what was checked, not "true".
+    truth_conclusive = closed or first_repeat is not None
     if not closed:
         status = "exceeded_limit"
     elif premature is not None:
@@ -391,6 +549,12 @@ def analyze(stage, notation, start_row=None, overrides=None, max_rows=None):
         problems.append("premature_rounds")
     if not closed:
         problems.extend(["exceeded_limit", "not_closed"])
+        if not truth_conclusive:
+            problems.append("truth_inconclusive")
+    truth = {"true": (first_repeat is None) if truth_conclusive else None,
+             "conclusive": truth_conclusive,
+             "checked_rows": step,
+             "first_repeat": first_repeat}
 
     return {
         "stage": stage,
@@ -408,7 +572,7 @@ def analyze(stage, notation, start_row=None, overrides=None, max_rows=None):
         "extent_rows": extent,
         "hunt_bells": hunt_bells,
         "working_bells": [b for b in range(1, stage + 1) if b not in hunt_bells],
-        "truth": {"true": first_repeat is None, "first_repeat": first_repeat},
+        "truth": truth,
         "premature_rounds": premature,
         "overrides": override_reports,
         "problems": problems,
@@ -456,16 +620,12 @@ def analyze_spliced(segments, start_row=None, max_rows=None):
 
     Raises SplicedError (located to a segment) on inconsistent stages, bad
     leads, out-of-range overrides or a cumulative row count above max_rows;
-    nothing is expanded in that case.
+    nothing is expanded in that case.  With no max_rows given the cap is one
+    extent; on stages 10-12 that is above the hard limit and LimitRequiredError
+    is raised before any segment is expanded.
     """
     if not isinstance(segments, (list, tuple)) or not segments:
         raise SplicedError("segments must be a non-empty list")
-    if max_rows is not None:
-        if isinstance(max_rows, bool) or not isinstance(max_rows, int) \
-                or max_rows < 1:
-            raise ValueError("max_rows must be a positive integer")
-        if max_rows > HARD_MAX_ROWS:
-            raise ValueError(f"max_rows may not exceed {HARD_MAX_ROWS}")
 
     infos = []
     stage = None
@@ -479,8 +639,9 @@ def analyze_spliced(segments, start_row=None, max_rows=None):
         check_stage(seg_stage)  # NotationError on a bad/missing stage
         if stage is None:
             stage = seg_stage
-            if effective_max is None:
-                effective_max = math.factorial(stage)
+            # resolve the cap now that the stage is known: no cap given on
+            # 10+ bells (stage! above the hard limit) refuses the job
+            effective_max = validate_max_rows(stage, effective_max)
         elif seg_stage != stage:
             raise SplicedError(
                 f"stage mismatch: segment has {seg_stage} bells, "
@@ -622,6 +783,9 @@ def analyze_spliced(segments, start_row=None, max_rows=None):
                     seen[nxt] = step
 
     closed = rows[-1] == start
+    # The whole planned touch is expanded (total_rows <= the cap is enforced
+    # up front), so truth is always judged over every planned row.
+    truth_conclusive = True
     if not closed:
         status = "not_closed"
     elif premature is not None:
@@ -700,7 +864,10 @@ def analyze_spliced(segments, start_row=None, max_rows=None):
         "extent_rows": extent,
         "status": status,          # ok | untrue | premature_rounds | not_closed
         "closed": closed,
-        "truth": {"true": first_repeat is None, "first_repeat": first_repeat},
+        "truth": {"true": first_repeat is None,
+                  "conclusive": truth_conclusive,
+                  "checked_rows": total_rows,
+                  "first_repeat": first_repeat},
         "premature_rounds": premature,
         "switches": switches,
         "methods_used": list(used.values()),
@@ -722,6 +889,15 @@ def _touch_summary(report):
     return out
 
 
+def _truth_value(report):
+    """truth.true for a report, tolerating pre-1.1 stored reports and the
+    inconclusive form {"true": null, "conclusive": false}."""
+    truth = report["truth"]
+    if not truth.get("conclusive", True):
+        return None
+    return truth["true"]
+
+
 def compare_touch_reports(report_a, report_b):
     """Compare two spliced-touch reports: size, closure, truth, methods."""
     fa = report_a["truth"]["first_repeat"]
@@ -732,6 +908,7 @@ def compare_touch_reports(report_a, report_b):
                        == (fb["first"]["index"], fb["second"]["index"]))
     ids_a = {m["method_id"] for m in report_a["methods_used"]}
     ids_b = {m["method_id"] for m in report_b["methods_used"]}
+    ta, tb = _truth_value(report_a), _truth_value(report_b)
     return {
         "a": _touch_summary(report_a),
         "b": _touch_summary(report_b),
@@ -739,7 +916,8 @@ def compare_touch_reports(report_a, report_b):
         "total_rows_equal": report_a["total_rows"] == report_b["total_rows"],
         "total_rows_delta": report_a["total_rows"] - report_b["total_rows"],
         "both_closed": report_a["closed"] and report_b["closed"],
-        "both_true": report_a["truth"]["true"] and report_b["truth"]["true"],
+        # null when either side's truth is inconclusive (checked under a cap)
+        "both_true": (ta is True and tb is True) if (ta is not None and tb is not None) else None,
         "first_repeat_same_position": same_repeat,
         "methods_overlap": sorted(ids_a & ids_b),
     }
@@ -762,12 +940,14 @@ def compare_reports(report_a, report_b):
     if fa and fb:
         same_repeat = ((fa["first"]["index"], fa["second"]["index"])
                        == (fb["first"]["index"], fb["second"]["index"]))
+    ta, tb = _truth_value(report_a), _truth_value(report_b)
     return {
         "a": _summary(report_a),
         "b": _summary(report_b),
         "period_rows_equal": pa is not None and pa == pb,
         "period_rows_delta": (pa - pb) if pa is not None and pb is not None else None,
         "both_closed": report_a["closed"] and report_b["closed"],
-        "both_true": report_a["truth"]["true"] and report_b["truth"]["true"],
+        # null when either side's truth is inconclusive (checked under a cap)
+        "both_true": (ta is True and tb is True) if (ta is not None and tb is not None) else None,
         "first_repeat_same_position": same_repeat,
     }

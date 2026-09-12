@@ -11,6 +11,7 @@ as JSON.
 
 import json
 import sys
+import urllib.error
 import urllib.request
 
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8000"
@@ -18,6 +19,11 @@ BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8000"
 PB_MINOR = "x.16.x.16.x.16.x.16.x.16.x.12"          # 12 lead end (plain)
 PB_MINOR_COMMA = "x16x16x16,12"                     # same lead, abbreviated
 PB_MINOR_14 = "x.16.x.16.x.16.x.16.x.16.x.14"       # 14 at every lead end
+# 10 and 12 bells: "10" = places 1 AND 10, "1T" = places 1 AND 12
+PB_ROYAL = "x10x10x10x10x10,12"      # Plain Bob Royal: 20-change lead
+PB_MAXIMUS = "x1Tx1Tx1Tx1Tx1Tx1T,12"  # Plain Bob Maximus: 24-change lead
+ROUNDS_10 = "1234567890"
+ROUNDS_12 = "1234567890ET"
 
 
 def call(method, path, body=None):
@@ -156,6 +162,60 @@ def main():
     with open(fname, "wb") as fh:
         fh.write(payload)
     print(f"\ndownloaded touch report -> {fname} ({len(payload)} bytes)")
+
+    # 14. 10 bells (Royal): "10" in place notation is places 1 AND 10; rows
+    #     write bell 10 as '0', e.g. rounds "1234567890"
+    royal = call("POST", "/api/methods",
+                 {"name": "Plain Bob Royal", "stage": 10,
+                  "notation": PB_ROYAL, "start_row": ROUNDS_10})
+    show("method: Plain Bob Royal (10 bells)", royal,
+         ["id", "stage", "version", "lead_length"])
+    print("first places token completed:", royal["changes"][1]["completed"],
+          "= places", royal["changes"][1]["places"], "(1 AND 10, never 'ten')")
+    # 10! exceeds the hard cap: creating an analysis without max_rows is refused
+    try:
+        call("POST", "/api/analyses", {"method_id": royal["id"]})
+    except urllib.error.HTTPError as e:
+        show("refused: 10! > hard limit, explicit max_rows required",
+             json.loads(e.read().decode()))
+    # an explicit cap within 1,000,000 runs the whole 180-row true course
+    ar = call("POST", "/api/analyses",
+              {"method_id": royal["id"], "max_rows": 100000})
+    show("analysis: Plain Bob Royal plain course", ar,
+         ["status", "lead_length", "lead_head", "period_rows", "truth"])
+
+    # 15. 12 bells (Maximus): capped to 240 checked rows -> not closed and no
+    #     full truth verdict ("truth.true" is null, only the range is claimed)
+    maximus = call("POST", "/api/methods",
+                   {"name": "Plain Bob Maximus", "stage": 12,
+                    "notation": PB_MAXIMUS, "start_row": ROUNDS_12})
+    ac = call("POST", "/api/analyses",
+              {"method_id": maximus["id"], "max_rows": 240})
+    show("analysis: Plain Bob Maximus, first 240 rows checked", ac,
+         ["status", "closed", "rows_generated", "truth", "problems"])
+    # cap high enough: the 264-row plain course closes and is true
+    af = call("POST", "/api/analyses",
+              {"method_id": maximus["id"], "max_rows": 1000})
+    show("analysis: Plain Bob Maximus plain course", af,
+         ["status", "lead_head", "period_rows", "truth"])
+
+    # 16. located errors at 12 bells: a compact row with bell E repeated
+    try:
+        call("POST", "/api/methods",
+             {"name": "Bad 12-bell row", "stage": 12, "notation": "x",
+              "start_row": "1234567890EE"})
+    except urllib.error.HTTPError as e:
+        show("duplicate bell in a compact row is located",
+             json.loads(e.read().decode()))
+
+    # 17. spliced touch on 12 bells (two leads, explicit cap)
+    t3 = call("POST", "/api/touches", {"max_rows": 1000, "segments": [
+        {"method_id": maximus["id"], "leads": 1},
+        {"method_id": maximus["id"], "leads": 1}]})
+    full = call("GET", f"/api/touches/{t3['id']}")
+    print("\n=== 12-bell spliced touch: switch point in 0/E/T symbols ===")
+    for sw in full["report"]["switches"]:
+        print(f"  row {sw['at_index']}: {sw['before_row']} -> {sw['after_row']}")
 
 
 if __name__ == "__main__":
