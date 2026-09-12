@@ -1,11 +1,12 @@
 """SQLite persistence for the change-ringing API.
 
-Five tables:
+Six tables:
     methods        - one row per method *version* (same name => version +1)
     analyses       - one row per analysis report, linked to a method version
     touches        - one row per spliced-touch report, spanning methods
     schemes        - one row per musicality scoring *scheme version*
     music_analyses - one row per scored analysis/touch against a scheme version
+    touch_searches - one row per touch-search job: config plus the full report
 """
 
 from __future__ import annotations
@@ -65,6 +66,21 @@ CREATE TABLE IF NOT EXISTS music_analyses (
     total_score  REAL NOT NULL,
     result       TEXT NOT NULL,
     created_at   TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS touch_searches (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    stage           INTEGER NOT NULL,
+    config          TEXT NOT NULL,
+    min_leads       INTEGER NOT NULL,
+    max_leads       INTEGER NOT NULL,
+    max_states      INTEGER NOT NULL,
+    max_results     INTEGER NOT NULL,
+    scheme_id       INTEGER,
+    status          TEXT NOT NULL,
+    truncated       INTEGER NOT NULL,
+    result_count    INTEGER NOT NULL,
+    report          TEXT NOT NULL,
+    created_at      TEXT NOT NULL
 );
 """
 
@@ -260,4 +276,49 @@ class Store:
         rec = dict(row)
         rec["partial"] = bool(rec["partial"])
         rec["result"] = json.loads(rec["result"])
+        return rec
+
+    # ----------------------------------------------------------- touch searches
+    def create_touch_search(self, stage, config, min_leads, max_leads,
+                            max_states, max_results, scheme_id, status,
+                            truncated, result_count, report):
+        """Store a touch-search job with its config and full report."""
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "INSERT INTO touch_searches (stage, config, min_leads, max_leads,"
+                " max_states, max_results, scheme_id, status, truncated,"
+                " result_count, report, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (stage, json.dumps(config), min_leads, max_leads, max_states,
+                 max_results, scheme_id, status, 1 if truncated else 0,
+                 result_count, json.dumps(report), _now()))
+            return self.get_touch_search(cur.lastrowid)
+
+    def get_touch_search(self, search_id):
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM touch_searches WHERE id = ?",
+                (search_id,)).fetchone()
+        return self._decode_search(row) if row else None
+
+    def list_touch_searches(self, stage=None, scheme_id=None):
+        clauses, params = [], []
+        if stage is not None:
+            clauses.append("stage = ?")
+            params.append(stage)
+        if scheme_id is not None:
+            clauses.append("scheme_id = ?")
+            params.append(scheme_id)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT * FROM touch_searches{where} ORDER BY id",
+                params).fetchall()
+        return [self._decode_search(r) for r in rows]
+
+    @staticmethod
+    def _decode_search(row):
+        rec = dict(row)
+        rec["truncated"] = bool(rec["truncated"])
+        rec["config"] = json.loads(rec["config"])
+        rec["report"] = json.loads(rec["report"])
         return rec

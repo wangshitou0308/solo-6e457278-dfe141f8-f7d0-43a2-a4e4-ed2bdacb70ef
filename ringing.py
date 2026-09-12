@@ -1703,3 +1703,431 @@ def compare_music(result_a, result_b):
         "rules": per_rule,
     })
     return base
+
+
+# ============================================================ touch search
+# Touch ("composition") search: at every lead boundary the search branches
+# over a set of same-stage method versions, and for each method over "plain"
+# (the notation as written) plus named calls - a call replaces one change
+# inside the lead by a single-change notation (a bob/single style device).
+#
+# Each branch continues from the previous lead's last row and accumulates the
+# rows already rung ("seen").  A lead that repeats a row without closing, or
+# returns to the start row mid-lead, is pruned; a branch is a solution only
+# when it comes back to the start row at a lead boundary within the requested
+# lead range with every other row unique.  Exploration is bounded by a state
+# cap (lead attempts) and a result cap (kept solutions); hitting either marks
+# the search "truncated" and the result must never be read as "no composition
+# exists".
+TOUCH_SEARCH_PLAIN = "plain"
+# Branch prune reasons, reported with counts:
+SEARCH_REPEAT = "repeat"                # a non-closing row was rung already
+SEARCH_PREMATURE = "premature_rounds"   # start row again before the lead end
+SEARCH_BELOW_MIN = "below_min_leads"    # closed true but shorter than min leads
+SEARCH_LEAD_LIMIT = "lead_limit"        # reached max leads without closing
+SEARCH_PRUNE_REASONS = (SEARCH_REPEAT, SEARCH_PREMATURE,
+                        SEARCH_BELOW_MIN, SEARCH_LEAD_LIMIT)
+SEARCH_DEFAULT_MAX_STATES = 100_000
+SEARCH_DEFAULT_MAX_RESULTS = 100
+
+
+class TouchSearchError(ValueError):
+    """A touch-search configuration error (nothing is searched or stored).
+
+    Attributes:
+        message: human readable description
+        code:    machine readable error code - "bad_search" (generic),
+                 "stage_mismatch", "bad_call", "too_large", "bad_limit"
+        method:  0-based index of the offending method entry
+        call:    0-based index of the offending call within that method
+        extra:   additional structured details
+    """
+
+    def __init__(self, message, code="bad_search", method=None, call=None,
+                 extra=None):
+        super().__init__(message)
+        self.message = message
+        self.code = code
+        self.method = method
+        self.call = call
+        self.extra = extra or {}
+
+    def to_dict(self):
+        out = {"error": self.message}
+        if self.method is not None:
+            out["method"] = self.method
+        if self.call is not None:
+            out["call"] = self.call
+        out.update(self.extra)
+        return out
+
+
+def _prepare_search_methods(methods):
+    """Validate and prepare the searched method versions and their calls.
+
+    methods: list of {"method_id", "name", "version", "stage", "notation",
+        "calls": [{"name", "change", "notation"}, ...]}.  Every method must be
+    on the same stage; a call names the lead-internal change (1-based) it
+    replaces and its notation must parse to exactly ONE change.  "plain" is
+    always offered implicitly and is a reserved call name.
+
+    Returns (stage, prepared) where each prepared method carries its parsed
+    changes and an ordered option list: plain first, then the named calls.
+    Raises TouchSearchError located to the method/call index.
+    """
+    if not isinstance(methods, (list, tuple)) or not methods:
+        raise TouchSearchError("methods must be a non-empty list")
+    stage = None
+    seen_ids = set()
+    prepared = []
+    for mi, spec in enumerate(methods):
+        if not isinstance(spec, dict):
+            raise TouchSearchError(f"method {mi} must be an object",
+                                   method=mi)
+        method_stage = spec.get("stage")
+        try:
+            check_stage(method_stage)
+        except NotationError:
+            raise TouchSearchError("stage must be an integer 4..12",
+                                   code="bad_search", method=mi,
+                                   extra={"stage": method_stage})
+        if stage is None:
+            stage = method_stage
+        elif method_stage != stage:
+            raise TouchSearchError(
+                f"stage mismatch: method {mi} is on {method_stage} bells, "
+                f"the search is on {stage}", code="stage_mismatch",
+                method=mi, extra={"stage": method_stage, "expected": stage})
+        method_id = spec.get("method_id")
+        if method_id in seen_ids:
+            raise TouchSearchError(
+                f"method version {method_id} is listed more than once",
+                method=mi, extra={"method_id": method_id})
+        seen_ids.add(method_id)
+        try:
+            changes = parse_notation(spec.get("notation"), stage)
+        except NotationError as err:
+            raise TouchSearchError(err.message, method=mi,
+                                   extra=_notation_details(err))
+        lead_len = len(changes)
+        calls = spec.get("calls") or []
+        if not isinstance(calls, list):
+            raise TouchSearchError("calls must be a list", code="bad_call",
+                                   method=mi)
+        options = [{
+            "call": TOUCH_SEARCH_PLAIN, "change": None,
+            "change_obj": None, "notation": None, "replaces_token": None,
+        }]
+        call_names = {TOUCH_SEARCH_PLAIN}
+        for ci, cspec in enumerate(calls):
+            if not isinstance(cspec, dict):
+                raise TouchSearchError("call must be an object",
+                                       code="bad_call", method=mi, call=ci)
+            name = cspec.get("name")
+            if not isinstance(name, str) or not name.strip():
+                raise TouchSearchError("call name must be a non-empty string",
+                                       code="bad_call", method=mi, call=ci,
+                                       extra={"field": "name"})
+            name = name.strip()
+            if name == TOUCH_SEARCH_PLAIN:
+                raise TouchSearchError(
+                    f"{TOUCH_SEARCH_PLAIN!r} is reserved for the unmodified lead",
+                    code="bad_call", method=mi, call=ci,
+                    extra={"field": "name"})
+            if name in call_names:
+                raise TouchSearchError(f"duplicate call name {name!r}",
+                                       code="bad_call", method=mi, call=ci,
+                                       extra={"field": "name"})
+            call_names.add(name)
+            change = cspec.get("change")
+            if isinstance(change, bool) or not isinstance(change, int) \
+                    or not 1 <= change <= lead_len:
+                raise TouchSearchError(
+                    f"call {name!r}: change must be between 1 and {lead_len} "
+                    f"(the lead length)", code="bad_call", method=mi,
+                    call=ci, extra={"field": "change", "change": change,
+                                    "lead_length": lead_len})
+            notation = cspec.get("notation")
+            try:
+                parsed = parse_notation(notation, stage)
+            except NotationError as err:
+                raise TouchSearchError(err.message, code="bad_call",
+                                       method=mi, call=ci,
+                                       extra={"field": "notation",
+                                              **_notation_details(err)})
+            if len(parsed) != 1:
+                raise TouchSearchError(
+                    f"call {name!r}: notation must be exactly one change, "
+                    f"got {len(parsed)}", code="bad_call", method=mi, call=ci,
+                    extra={"field": "notation", "change_count": len(parsed)})
+            options.append({"call": name, "change": change,
+                            "change_obj": parsed[0], "notation": notation,
+                            "replaces_token": changes[change - 1].token})
+        prepared.append({"method_id": method_id, "name": spec.get("name"),
+                         "version": spec.get("version"), "stage": stage,
+                         "lead_len": lead_len, "changes": changes,
+                         "options": options})
+    return stage, prepared
+
+
+def _expand_search_lead(m, option, head, start, seen):
+    """Ring one lead of method m from head with the given plain/call option.
+
+    Returns (rows, None): rows[0] is head and rows[-1] the lead head, or
+    (rows, reason) when the lead is pruned - a non-closing repeat or a return
+    to the start row before the lead end.  Closing onto the start row exactly
+    at the lead end is allowed and comes back as rows[-1] == start.
+    """
+    changes = m["changes"]
+    lead_len = m["lead_len"]
+    call_at = option["change"]
+    call_obj = option["change_obj"]
+    row = head
+    rows = [head]
+    local = set()  # rows already produced inside this very lead
+    for pos in range(1, lead_len + 1):
+        change = call_obj if call_at == pos else changes[pos - 1]
+        row = change.apply(row)
+        closing = pos == lead_len and row == start
+        if row == start and not closing:
+            return rows, SEARCH_PREMATURE
+        if not closing and (row in seen or row in local):
+            return rows, SEARCH_REPEAT
+        local.add(row)
+        rows.append(row)
+    return rows, None
+
+
+def _replay_candidate(stage, start, choices, prepared, rules):
+    """Re-expand a solved choice path: decision records, music and counts."""
+    entries = [{"index": 0, "segment": None, "method_id": None,
+                "method": None, "version": None, "lead": 0, "change": 0,
+                "row": row_str(start)}]
+    decisions = []
+    lead_end_indexes = set()
+    calls = switches = index = 0
+    prev_mi = None
+    head = start
+    for lead_no, (mi, oi) in enumerate(choices, start=1):
+        m = prepared[mi]
+        option = m["options"][oi]
+        call_at = option["change"]
+        call_obj = option["change_obj"]
+        from_index = index
+        for pos in range(1, m["lead_len"] + 1):
+            change = call_obj if call_at == pos else m["changes"][pos - 1]
+            head = change.apply(head)
+            index += 1
+            entries.append({"index": index, "segment": None,
+                            "method_id": m["method_id"], "method": m["name"],
+                            "version": m["version"], "lead": lead_no,
+                            "change": pos, "row": row_str(head),
+                            "token": change.token})
+        lead_end_indexes.add(index)
+        decisions.append({
+            "lead": lead_no, "method_id": m["method_id"],
+            "method": m["name"], "version": m["version"],
+            "call": option["call"], "change": option["change"],
+            "notation": option["notation"],
+            "replaces_token": option["replaces_token"],
+            "lead_length": m["lead_len"], "from_index": from_index,
+            "to_index": index, "lead_head": row_str(head)})
+        if option["call"] != TOUCH_SEARCH_PLAIN:
+            calls += 1
+        if prev_mi is not None and mi != prev_mi:
+            switches += 1
+        prev_mi = mi
+    music = None
+    if rules:
+        method_seed = [(m["method_id"], m["name"], m["version"])
+                       for m in prepared]
+        scored = _score_entries(entries, stage, rules, is_touch=False,
+                                method_seed=method_seed, segment_seed=[],
+                                lead_end_indexes=lead_end_indexes)
+        music = {"total_score": scored["total_score"],
+                 "total_hits": scored["total_hits"]}
+    return decisions, calls, switches, index, music
+
+
+def _search_method_info(m):
+    return {"method_id": m["method_id"], "name": m["name"],
+            "version": m["version"], "stage": m["stage"],
+            "lead_length": m["lead_len"],
+            "calls": [{"name": o["call"], "change": o["change"],
+                       "notation": o["notation"],
+                       "replaces_token": o["replaces_token"]}
+                      for o in m["options"][1:]]}
+
+
+def search_touches(methods, start_row=None, min_leads=1, max_leads=None,
+                   max_states=SEARCH_DEFAULT_MAX_STATES,
+                   max_results=SEARCH_DEFAULT_MAX_RESULTS, scheme=None):
+    """Search for true, closing touches by branching on methods and calls.
+
+    At each lead boundary every (method, plain|named call) option is tried;
+    the branch continues from the lead head, adding the lead's rows to the
+    accumulated seen set.  A lead is pruned on a non-closing repeat
+    ("repeat") or a premature return to start_row ("premature_rounds");
+    closing true short of min_leads is pruned ("below_min_leads") and running
+    to max_leads without closing is pruned ("lead_limit").
+
+    max_states bounds the number of lead attempts (exploration budget) and
+    max_results the number of solutions kept; reaching either stops the
+    search with truncated=True (truncated_reason "max_states"/"max_results")
+    and the outcome must never be reported as "no solution".  With both caps
+    untouched the exploration is exhaustive.
+
+    scheme: optional normalized parse_scheme() scheme used only to rank
+    candidates (total music score; segment-restricted rules never match - a
+    candidate is not segmented before export).  Candidates are ranked by
+    music score descending, then fewer calls, fewer switches, fewer leads and
+    finally the lexicographic decision sequence.
+
+    The longest possible path (max_leads times the longest lead) must fit in
+    HARD_MAX_ROWS rows, otherwise the search is refused (TouchSearchError,
+    code "too_large"); differing stages and bad calls refuse it likewise.
+    """
+    stage, prepared = _prepare_search_methods(methods)
+    if isinstance(max_leads, bool) or not isinstance(max_leads, int) \
+            or max_leads < 1:
+        raise TouchSearchError("max_leads must be a positive integer",
+                               code="bad_limit", extra={"field": "max_leads"})
+    if isinstance(min_leads, bool) or not isinstance(min_leads, int) \
+            or not 1 <= min_leads <= max_leads:
+        raise TouchSearchError(
+            "min_leads must be a positive integer not greater than max_leads",
+            code="bad_limit",
+            extra={"field": "min_leads", "min_leads": min_leads,
+                   "max_leads": max_leads})
+    for field, value in (("max_states", max_states),
+                         ("max_results", max_results)):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise TouchSearchError(f"{field} must be a positive integer",
+                                   code="bad_limit", extra={"field": field})
+    max_lead_len = max(m["lead_len"] for m in prepared)
+    max_possible_rows = max_leads * max_lead_len
+    if max_possible_rows > HARD_MAX_ROWS:
+        raise TouchSearchError(
+            f"longest possible path is {max_possible_rows:,} rows "
+            f"({max_leads} leads x {max_lead_len} rows), which exceeds the "
+            f"hard limit of {HARD_MAX_ROWS:,}",
+            code="too_large",
+            extra={"max_possible_rows": max_possible_rows,
+                   "hard_max_rows": HARD_MAX_ROWS, "max_leads": max_leads,
+                   "max_lead_length": max_lead_len})
+    start = parse_row(start_row, stage)
+    rules = None
+    if scheme is not None:
+        if not is_normalized_scheme(scheme):
+            scheme = parse_scheme(scheme, stage)
+        if scheme["stage"] != stage:
+            raise SchemeError(
+                f"stage mismatch: scheme is on {scheme['stage']} bells, "
+                f"the search is on {stage}", field="scheme")
+        rules = scheme["rules"]
+
+    # Flat option list in declared order (methods in order, plain first).
+    options = [(mi, oi) for mi, m in enumerate(prepared)
+               for oi in range(len(m["options"]))]
+    pruned = {reason: 0 for reason in SEARCH_PRUNE_REASONS}
+    results = []
+    states_used = 0
+    max_depth = 0
+    truncated_reason = None
+    # Iterative DFS (paths can be far longer than Python's recursion limit):
+    # (head row, seen set, chosen (method_index, option_index) tuple, depth).
+    stack = [(start, {start}, (), 0)]
+    while stack and truncated_reason is None:
+        head, seen, choices, depth = stack.pop()
+        lead_no = depth + 1
+        if lead_no > max_depth:
+            max_depth = lead_no
+        children = []
+        for mi, oi in options:
+            if states_used >= max_states:
+                truncated_reason = "max_states"
+                break
+            states_used += 1
+            m = prepared[mi]
+            option = m["options"][oi]
+            rows, reason = _expand_search_lead(m, option, head, start, seen)
+            if reason is not None:
+                pruned[reason] += 1
+                continue
+            lead_head = rows[-1]
+            if lead_head == start:
+                # closure only counts inside the requested lead range
+                if lead_no < min_leads:
+                    pruned[SEARCH_BELOW_MIN] += 1
+                    continue
+                decisions, calls, switches, total_rows, music = \
+                    _replay_candidate(stage, start,
+                                      choices + ((mi, oi),), prepared, rules)
+                results.append({
+                    "leads": lead_no, "rows": total_rows, "calls": calls,
+                    "switches": switches, "closed": True, "true": True,
+                    "start_row": row_str(start), "end_row": row_str(lead_head),
+                    "music_score": music["total_score"] if music else None,
+                    "music_hits": music["total_hits"] if music else None,
+                    "decisions": decisions,
+                    "_signature": ";".join(
+                        f"{pj}:{prepared[pj]['options'][pj_o]['call']}"
+                        for pj, pj_o in choices + ((mi, oi),))})
+                if len(results) >= max_results:
+                    truncated_reason = "max_results"
+                    break
+            elif lead_no >= max_leads:
+                pruned[SEARCH_LEAD_LIMIT] += 1
+            else:
+                new_seen = set(seen)
+                new_seen.update(rows[1:])
+                children.append((lead_head, new_seen,
+                                 choices + ((mi, oi),), lead_no))
+        # push in reverse so the declared option order is explored first
+        stack.extend(reversed(children))
+
+    def _sort_key(candidate):
+        return (-(candidate["music_score"] or 0), candidate["calls"],
+                candidate["switches"], candidate["leads"],
+                candidate["_signature"])
+
+    results.sort(key=_sort_key)
+    for i, candidate in enumerate(results):
+        del candidate["_signature"]
+        candidate["index"] = i
+    if truncated_reason is not None:
+        status = "truncated"
+    elif results:
+        status = "ok"
+    else:
+        # exhaustive search with no candidate: a definite "no solution here"
+        status = "exhausted"
+    return {
+        "stage": stage,
+        "start_row": row_str(start),
+        "lead_range": {"min": min_leads, "max": max_leads},
+        "max_states": max_states,
+        "max_results": max_results,
+        "max_lead_length": max_lead_len,
+        "max_possible_rows": max_possible_rows,
+        "branching_factor": len(options),
+        "scoring_version": SCORING_VERSION if rules else None,
+        "scheme": _scheme_ref(scheme) if rules else None,
+        "methods": [_search_method_info(m) for m in prepared],
+        "status": status,          # ok | exhausted | truncated
+        "truncated": truncated_reason is not None,
+        "truncated_reason": truncated_reason,
+        "exhausted": truncated_reason is None,
+        "result_count": len(results),
+        "results": results,
+        "prune_reasons": pruned,
+        "stats": {
+            "states_used": states_used,
+            "options_tried": states_used,
+            "pruned": sum(pruned.values()),
+            "prune_reasons": dict(pruned),
+            "max_depth_reached": max_depth,
+            "branching_factor": len(options),
+            "candidates_found": len(results),
+        },
+    }

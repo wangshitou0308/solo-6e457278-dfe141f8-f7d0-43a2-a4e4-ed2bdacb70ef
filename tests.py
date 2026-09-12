@@ -12,10 +12,11 @@ import urllib.request
 
 from db import Store
 from ringing import (HARD_MAX_ROWS, LimitRequiredError, NotationError,
-                     SchemeError, SplicedError, analyze, analyze_spliced,
-                     compare_music, compare_reports, compare_touch_reports,
-                     parse_notation, parse_row, parse_scheme, row_str,
-                     score_analysis, score_touch, stroke_for_index)
+                     SchemeError, SplicedError, TouchSearchError, analyze,
+                     analyze_spliced, compare_music, compare_reports,
+                     compare_touch_reports, parse_notation, parse_row,
+                     parse_scheme, row_str, score_analysis, score_touch,
+                     search_touches, stroke_for_index)
 from server import make_server
 
 # Plain Bob Minor: 12-change lead, lead head 135264, 5 leads = 60 rows, true.
@@ -731,6 +732,234 @@ class SplicedTests(unittest.TestCase):
         self.assertEqual(cmp["methods_overlap"], [1])
         self.assertEqual(cmp["a"]["status"], "ok")
         self.assertEqual(cmp["b"]["status"], "not_closed")
+
+
+class TouchSearchTests(unittest.TestCase):
+    @staticmethod
+    def method(method_id=1, notation=PB_MINOR, stage=6, name="PB", version=1,
+               calls=None):
+        return {"method_id": method_id, "name": name, "version": version,
+                "stage": stage, "notation": notation, "calls": calls or []}
+
+    @staticmethod
+    def bob():
+        return {"name": "bob", "change": 12, "notation": "14"}
+
+    def test_plain_only_finds_plain_course(self):
+        # plain only, fixed at 5 leads: exactly one candidate, the plain course
+        rep = search_touches([self.method()], min_leads=5, max_leads=5)
+        self.assertEqual(rep["status"], "ok")
+        self.assertFalse(rep["truncated"])
+        self.assertTrue(rep["exhausted"])
+        self.assertEqual(rep["result_count"], 1)
+        cand = rep["results"][0]
+        self.assertEqual((cand["leads"], cand["rows"], cand["calls"],
+                          cand["switches"]), (5, 60, 0, 0))
+        self.assertEqual(cand["end_row"], "123456")
+        self.assertTrue(all(d["call"] == "plain" for d in cand["decisions"]))
+        heads = [d["lead_head"] for d in cand["decisions"]]
+        self.assertEqual(heads, ["135264", "156342", "164523",
+                                 "142635", "123456"])
+        # every lead decision reports lead head and the plain option carries
+        # no replacement change
+        self.assertIsNone(cand["decisions"][0]["change"])
+        self.assertIsNone(cand["music_score"])
+        self.assertEqual(rep["prune_reasons"]["repeat"], 0)
+
+    def test_three_bob_touch_found_and_ranked_second(self):
+        rep = search_touches([self.method(calls=[self.bob()])],
+                             min_leads=1, max_leads=5)
+        self.assertEqual(rep["status"], "ok")
+        self.assertGreaterEqual(rep["result_count"], 2)
+        first, second = rep["results"][:2]
+        # fewer calls sorts first: the plain course has 0 calls
+        self.assertEqual((first["leads"], first["calls"]), (5, 0))
+        # the classic 3-bob touch closes at 3 leads / 36 rows
+        self.assertEqual((second["leads"], second["rows"], second["calls"]),
+                         (3, 36, 3))
+        self.assertEqual([d["call"] for d in second["decisions"]],
+                         ["bob", "bob", "bob"])
+        self.assertEqual(second["decisions"][0]["replaces_token"], "12")
+        self.assertEqual(second["decisions"][0]["change"], 12)
+
+    def test_repeat_and_premature_branches_pruned(self):
+        # with only a plain lead nothing closes inside 4 leads, and the plain
+        # course that closes at 5 is beyond the range: leaves are lead_limit
+        rep = search_touches([self.method()], min_leads=1, max_leads=4)
+        self.assertEqual(rep["status"], "exhausted")  # nothing closes in range
+        self.assertEqual(rep["result_count"], 0)
+        self.assertFalse(rep["truncated"])
+        self.assertGreater(rep["prune_reasons"]["lead_limit"], 0)
+        self.assertEqual(rep["stats"]["candidates_found"], 0)
+        # adding a call produces non-closing repeat branches too (they show
+        # up once a branch goes past its closing lead)
+        rep = search_touches([self.method(calls=[self.bob()])],
+                             min_leads=1, max_leads=4)
+        self.assertEqual(rep["status"], "ok")
+        self.assertGreater(rep["prune_reasons"]["repeat"], 0)
+        self.assertGreater(rep["prune_reasons"]["lead_limit"], 0)
+        # an exhausted search is a definite "no solution in this range",
+        # not a truncation
+        rep = search_touches([self.method()], min_leads=1, max_leads=4)
+        self.assertIsNone(rep["truncated_reason"])
+
+    def test_below_min_leads_pruned(self):
+        # plain course needs 5 leads; allowing only 1..4 closes nowhere, but
+        # a close shorter than min is also pruned (check via a closing touch)
+        rep = search_touches([self.method(calls=[self.bob()])],
+                             min_leads=4, max_leads=5)
+        # the 3-lead bob touch is below min and must be absent
+        self.assertTrue(all(c["leads"] >= 4 for c in rep["results"]))
+        self.assertEqual(rep["results"][0]["leads"], 5)
+        # force below-min pruning directly: min=4 makes the 3-lead close prune
+        rep2 = search_touches([self.method(calls=[self.bob()])],
+                              min_leads=4, max_leads=4)
+        self.assertEqual(rep2["result_count"], 0)
+        self.assertGreater(rep2["prune_reasons"]["below_min_leads"], 0)
+
+    def test_truncated_by_state_cap_is_not_exhausted(self):
+        rep = search_touches([self.method(calls=[self.bob()])],
+                             min_leads=1, max_leads=5, max_states=20)
+        self.assertEqual(rep["status"], "truncated")
+        self.assertTrue(rep["truncated"])
+        self.assertEqual(rep["truncated_reason"], "max_states")
+        self.assertEqual(rep["stats"]["states_used"], 20)
+        # truncated findings are still reported
+        self.assertGreaterEqual(rep["result_count"], 0)
+
+    def test_truncated_by_result_cap(self):
+        rep = search_touches([self.method(calls=[
+            self.bob(), {"name": "single", "change": 12, "notation": "1234"}])],
+            min_leads=1, max_leads=5, max_results=2)
+        self.assertEqual(rep["status"], "truncated")
+        self.assertEqual(rep["truncated_reason"], "max_results")
+        self.assertEqual(rep["result_count"], 2)
+
+    def test_switch_counting_between_methods(self):
+        m2 = self.method(method_id=2, notation=PB_MINOR_14, name="PB14")
+        rep = search_touches(
+            [self.method(method_id=1), m2], min_leads=5, max_leads=5,
+            max_results=500)
+        self.assertEqual(rep["status"], "ok")
+        self.assertEqual(rep["branching_factor"], 2)
+        # every non-plain-course candidate switches methods at least once
+        switched = [c for c in rep["results"][1:]]
+        self.assertTrue(all(c["switches"] >= 1 for c in switched))
+        # switches = number of boundaries where adjacent methods differ
+        for cand in switched:
+            ids = [d["method_id"] for d in cand["decisions"]]
+            expected = sum(1 for a, b in zip(ids, ids[1:]) if a != b)
+            self.assertEqual(cand["switches"], expected)
+        # call option on method 2 that turns its 14 lead end into plain 12
+        m2c = dict(m2, calls=[{"name": "p12", "change": 12, "notation": "12"}])
+        rep2 = search_touches([self.method(method_id=1), m2c],
+                              min_leads=1, max_leads=5, max_results=500)
+        self.assertTrue(any(c["calls"] >= 1 for c in rep2["results"]))
+
+    def test_music_scheme_ranks_candidates(self):
+        scheme = parse_scheme({"name": "s", "stage": 6, "rules": [
+            {"name": "front up", "kind": "run", "direction": "up",
+             "position": "front", "min_length": 4, "weight": 2},
+            {"name": "back down", "kind": "run", "direction": "down",
+             "position": "back", "min_length": 4}]}, stage=6)
+        rep = search_touches([self.method(calls=[self.bob()])],
+                             min_leads=1, max_leads=5, scheme=scheme)
+        self.assertTrue(all(c["music_score"] is not None for c in rep["results"]))
+        scores = [c["music_score"] for c in rep["results"]]
+        self.assertEqual(scores, sorted(scores, reverse=True))
+        self.assertEqual(rep["scheme"]["name"], "s")
+
+    def test_call_validation_errors(self):
+        with self.assertRaises(TouchSearchError) as ctx:
+            search_touches([self.method(calls=[
+                {"name": "bob", "change": 99, "notation": "14"}])],
+                min_leads=1, max_leads=5)
+        self.assertEqual((ctx.exception.code, ctx.exception.method,
+                          ctx.exception.call), ("bad_call", 0, 0))
+        with self.assertRaises(TouchSearchError) as ctx:
+            search_touches([self.method(calls=[
+                {"name": "bob", "change": 1, "notation": "x.16"}])],
+                min_leads=1, max_leads=5)
+        self.assertEqual(ctx.exception.code, "bad_call")
+        self.assertIn("one change", ctx.exception.message)
+        with self.assertRaises(TouchSearchError) as ctx:
+            search_touches([self.method(calls=[
+                {"name": "plain", "change": 12, "notation": "14"}])],
+                min_leads=1, max_leads=5)
+        self.assertEqual(ctx.exception.code, "bad_call")
+        with self.assertRaises(TouchSearchError) as ctx:
+            search_touches([self.method(calls=[
+                {"name": "bob", "change": 12, "notation": "1a"}])],
+                min_leads=1, max_leads=5)
+        self.assertEqual(ctx.exception.code, "bad_call")
+        with self.assertRaises(TouchSearchError):
+            search_touches([self.method(calls=[
+                {"name": "bob", "change": 12, "notation": "14"},
+                {"name": "bob", "change": 12, "notation": "16"}])],
+                min_leads=1, max_leads=5)
+
+    def test_stage_mismatch_refused(self):
+        other = self.method(method_id=2, stage=5,
+                            notation="3.1.5.1.5.1.5.1.5.125")
+        with self.assertRaises(TouchSearchError) as ctx:
+            search_touches([self.method(), other], min_leads=1, max_leads=5)
+        self.assertEqual(ctx.exception.code, "stage_mismatch")
+        self.assertEqual((ctx.exception.method, ctx.exception.extra["stage"],
+                          ctx.exception.extra["expected"]), (1, 5, 6))
+
+    def test_path_over_hard_limit_refused(self):
+        with self.assertRaises(TouchSearchError) as ctx:
+            search_touches([self.method(method_id=1, stage=10,
+                                        notation=PB_ROYAL)],
+                           min_leads=1, max_leads=50001)
+        self.assertEqual(ctx.exception.code, "too_large")
+        self.assertEqual(ctx.exception.extra["max_possible_rows"],
+                         50001 * 20)
+        self.assertEqual(ctx.exception.extra["hard_max_rows"], HARD_MAX_ROWS)
+        # the boundary itself (exactly 1,000,000 rows) is accepted; a small
+        # state cap on a branching search truncates instead of being exhaustive
+        rep = search_touches([self.method(
+            method_id=1, stage=10, notation=PB_ROYAL,
+            calls=[{"name": "bob", "change": 20, "notation": "14"}])],
+            min_leads=1, max_leads=50000, max_states=10)
+        self.assertEqual(rep["status"], "truncated")
+        self.assertEqual(rep["max_possible_rows"], HARD_MAX_ROWS)
+
+    def test_bad_limits_and_methods_refused(self):
+        with self.assertRaises(TouchSearchError):
+            search_touches([self.method()], min_leads=1, max_leads=0)
+        with self.assertRaises(TouchSearchError):
+            search_touches([self.method()], min_leads=6, max_leads=5)
+        with self.assertRaises(TouchSearchError):
+            search_touches([self.method()], min_leads=1, max_leads=5,
+                           max_states=0)
+        with self.assertRaises(TouchSearchError):
+            search_touches([], min_leads=1, max_leads=5)
+        with self.assertRaises(TouchSearchError):
+            search_touches([self.method(method_id=1),
+                            self.method(method_id=1)],
+                           min_leads=1, max_leads=5)
+
+    def test_candidate_replays_are_true_and_closed(self):
+        rep = search_touches([self.method(calls=[self.bob()])],
+                             min_leads=1, max_leads=5)
+        for cand in rep["results"]:
+            # re-ring from the decision list: unique rows, ending at rounds
+            rows = {"123456"}
+            head = tuple(range(1, 7))
+            changes = parse_notation(PB_MINOR, 6)
+            bob_ch, = parse_notation("14", 6)
+            for d in cand["decisions"]:
+                for pos in range(1, 13):
+                    ch = bob_ch if d["call"] == "bob" and pos == 12 \
+                        else changes[pos - 1]
+                    head = ch.apply(head)
+                    closing = pos == 12 and head == tuple(range(1, 7))
+                    if not closing:
+                        self.assertNotIn(head, rows)
+                    rows.add(head)
+            self.assertEqual(head, tuple(range(1, 7)))
+            self.assertTrue(cand["true"] and cand["closed"])
 
 
 class SchemeParseTests(unittest.TestCase):
@@ -1819,6 +2048,279 @@ class ApiTests(unittest.TestCase):
                                     {"name": "s", "kind": "sequence",
                                      "bells": "0T"}]}, expect=400)
         self.assertEqual((out["token"], out["offset"]), ("T", 1))
+
+
+class TouchSearchApiTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.server = make_server("127.0.0.1", 0, ":memory:")
+        cls.port = cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.base = f"http://127.0.0.1:{cls.port}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.server.store.close()
+
+    def call(self, method, path, body=None, expect=200):
+        req = urllib.request.Request(self.base + path, method=method)
+        data = json.dumps(body).encode() if body is not None else None
+        if data is not None:
+            req.add_header("Content-Type", "application/json")
+        try:
+            with urllib.request.urlopen(req, data=data) as resp:
+                return resp.status, json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            payload = json.loads(e.read().decode())
+            if e.code != expect:
+                raise AssertionError(f"{method} {path}: got {e.code} {payload}")
+            return e.code, payload
+
+    def setUp(self):
+        status, self.pb = self.call("POST", "/api/methods",
+                                    {"name": "Search PB Minor", "stage": 6,
+                                     "notation": PB_MINOR})
+        status, self.pb14 = self.call("POST", "/api/methods",
+                                      {"name": "Search PB14", "stage": 6,
+                                       "notation": PB_MINOR_14})
+
+    def search_body(self, **kw):
+        body = {"methods": [{"method_id": self.pb["id"], "calls": [
+            {"name": "bob", "change": 12, "notation": "14"}]}],
+            "min_leads": 1, "max_leads": 5}
+        body.update(kw)
+        return body
+
+    def test_19_search_plain_course_and_bobs(self):
+        status, s = self.call("POST", "/api/touch-searches", self.search_body())
+        self.assertEqual(status, 201)
+        self.assertEqual(s["status"], "ok")
+        self.assertFalse(s["truncated"])
+        self.assertEqual(s["stage"], 6)
+        self.assertEqual(s["branching_factor"], 2)
+        self.assertGreaterEqual(s["result_count"], 2)
+        # ordered: plain course (0 calls) before the 3-bob touch
+        self.assertEqual((s["results"][0]["leads"], s["results"][0]["calls"]),
+                         (5, 0))
+        self.assertEqual(s["results"][1]["calls"], 3)
+        self.assertIn("stats", s)
+        self.assertIn("repeat", s["prune_reasons"])
+        for link in ("report", "candidates", "export", "download"):
+            self.assertIn(link, s["links"])
+        # listing
+        status, lst = self.call("GET", "/api/touch-searches")
+        self.assertTrue(any(x["id"] == s["id"]
+                            for x in lst["touch_searches"]))
+        status, lst = self.call("GET", f"/api/touch-searches?stage=6")
+        self.assertTrue(all(x["stage"] == 6 for x in lst["touch_searches"]))
+        # summary results carry no decision list
+        self.assertNotIn("decisions", s["results"][0])
+
+    def test_20_full_report_and_candidate_pagination(self):
+        status, s = self.call("POST", "/api/touch-searches", self.search_body())
+        sid = s["id"]
+        status, page = self.call("GET",
+                                 f"/api/touch-searches/{sid}/candidates?limit=1")
+        self.assertEqual(page["total"], s["result_count"])
+        self.assertEqual(page["limit"], 1)
+        self.assertEqual(len(page["candidates"]), 1)
+        self.assertEqual(page["candidates"][0]["index"], 0)
+        status, page = self.call("GET",
+                                 f"/api/touch-searches/{sid}/candidates?offset=1&limit=1")
+        cand = page["candidates"][0]
+        self.assertEqual(cand["index"], 1)
+        # full decisions: 3 bobs across 3 leads, ending at rounds
+        self.assertEqual([d["call"] for d in cand["decisions"]],
+                         ["bob", "bob", "bob"])
+        self.assertEqual(cand["decisions"][-1]["lead_head"], "123456")
+        # the full search report paginates results too
+        status, full = self.call("GET",
+                                 f"/api/touch-searches/{sid}?offset=0&limit=1")
+        self.assertEqual(full["report"]["results_page"]["total"],
+                         s["result_count"])
+        self.assertEqual(len(full["report"]["results"]), 1)
+        self.assertEqual(full["config"]["max_leads"], 5)
+        self.assertEqual(full["config"]["methods"][0]["method_id"],
+                         self.pb["id"])
+
+    def test_21_export_replays_candidate_as_true_touch(self):
+        status, s = self.call("POST", "/api/touch-searches", self.search_body())
+        sid = s["id"]
+        # export index 1 = the 3-bob touch
+        status, t = self.call("POST", f"/api/touch-searches/{sid}/export",
+                              {"index": 1})
+        self.assertEqual(status, 201)
+        self.assertTrue(t["closed"])
+        self.assertEqual(t["status"], "ok")
+        self.assertEqual(t["total_rows"], 36)
+        self.assertEqual(t["exported_from"],
+                         {"search_id": sid, "candidate_index": 1})
+        self.assertTrue(t["truth"]["true"])
+        # the stored touch has one segment with three applied bob overrides
+        status, full = self.call("GET", f"/api/touches/{t['id']}")
+        seg = full["report"]["segments"][0]
+        self.assertEqual(seg["method_id"], self.pb["id"])
+        self.assertEqual(len(seg["overrides"]), 3)
+        self.assertTrue(all(o["applied"] and o["notation"] == "14"
+                            for o in seg["overrides"]))
+        # default export uses index 0 (the plain course, 60 rows)
+        status, t0 = self.call("POST", f"/api/touch-searches/{sid}/export", {})
+        self.assertEqual(t0["total_rows"], 60)
+        self.assertEqual(t0["segment_count"], 1)
+        # out-of-range candidate is a 404
+        status, out = self.call("POST", f"/api/touch-searches/{sid}/export",
+                                {"index": 999}, expect=404)
+        self.assertEqual(out["code"], "not_found")
+
+    def test_22_export_of_switched_candidate_makes_segments(self):
+        body = {"methods": [
+            {"method_id": self.pb["id"]},
+            {"method_id": self.pb14["id"],
+             "calls": [{"name": "p12", "change": 12, "notation": "12"}]}],
+            "min_leads": 5, "max_leads": 5, "max_results": 500}
+        status, s = self.call("POST", "/api/touch-searches", body)
+        self.assertEqual(status, 201)
+        switched = next(c for c in s["results"] if c["switches"] >= 1)
+        status, cand = self.call(
+            "GET",
+            f"/api/touch-searches/{s['id']}/candidates?offset={switched['index']}"
+            "&limit=1")
+        choice = cand["candidates"][0]
+        status, t = self.call("POST", f"/api/touch-searches/{s['id']}/export",
+                              {"index": switched["index"]})
+        self.assertTrue(t["closed"] and t["truth"]["true"])
+        status, full = self.call("GET", f"/api/touches/{t['id']}")
+        segs = full["report"]["segments"]
+        self.assertEqual(len(segs),
+                         sum(1 for a, b in zip(
+                             [d["method_id"] for d in choice["decisions"]],
+                             [d["method_id"] for d in choice["decisions"]][1:])
+                             if a != b) + 1)
+        # switches in the exported touch agree with the search's count
+        self.assertEqual(len(full["report"]["switches"]),
+                         switched["switches"])
+
+    def test_23_truncated_by_caps_is_not_exhausted(self):
+        body = self.search_body(max_states=20)
+        status, s = self.call("POST", "/api/touch-searches", body)
+        self.assertEqual(s["status"], "truncated")
+        self.assertTrue(s["truncated"])
+        self.assertEqual(s["truncated_reason"], "max_states")
+        self.assertLessEqual(s["stats"]["states_used"], 20)
+        # result cap
+        body = self.search_body(max_states=100000, max_results=1)
+        status, s = self.call("POST", "/api/touch-searches", body)
+        self.assertEqual(s["truncated_reason"], "max_results")
+        self.assertEqual(s["result_count"], 1)
+
+    def test_24_rejected_configurations(self):
+        # nothing rejected below is stored: compare against the prior count
+        _, before = self.call("GET", "/api/touch-searches")
+        n_before = len(before["touch_searches"])
+        # stage mismatch
+        status, gd = self.call("POST", "/api/methods",
+                               {"name": "Search GD", "stage": 5,
+                                "notation": "3.1.5.1.5.1.5.1.5.125"})
+        status, out = self.call("POST", "/api/touch-searches", {
+            "methods": [{"method_id": self.pb["id"]},
+                        {"method_id": gd["id"]}], "max_leads": 5}, expect=400)
+        self.assertEqual(out["code"], "stage_mismatch")
+        self.assertEqual(out["method"], 1)
+        self.assertEqual(out["expected"], 6)
+        # call change out of range
+        status, out = self.call("POST", "/api/touch-searches", {
+            "methods": [{"method_id": self.pb["id"], "calls": [
+                {"name": "x", "change": 99, "notation": "14"}]}],
+            "max_leads": 5}, expect=400)
+        self.assertEqual(out["code"], "bad_call")
+        self.assertEqual((out["method"], out["call"], out["lead_length"]),
+                         (0, 0, 12))
+        # call notation that is not a single change
+        status, out = self.call("POST", "/api/touch-searches", {
+            "methods": [{"method_id": self.pb["id"], "calls": [
+                {"name": "x", "change": 12, "notation": "x.16"}]}],
+            "max_leads": 5}, expect=400)
+        self.assertEqual(out["code"], "bad_call")
+        self.assertEqual(out["change_count"], 2)
+        # reserved call name
+        status, out = self.call("POST", "/api/touch-searches", {
+            "methods": [{"method_id": self.pb["id"], "calls": [
+                {"name": "plain", "change": 12, "notation": "14"}]}],
+            "max_leads": 5}, expect=400)
+        self.assertEqual(out["code"], "bad_call")
+        # path longer than the hard limit
+        status, royal = self.call("POST", "/api/methods",
+                                  {"name": "Search Royal", "stage": 10,
+                                   "notation": PB_ROYAL,
+                                   "start_row": ROUNDS_10})
+        status, out = self.call("POST", "/api/touch-searches", {
+            "methods": [{"method_id": royal["id"]}],
+            "max_leads": 50001}, expect=400)
+        self.assertEqual(out["code"], "too_large")
+        self.assertEqual(out["hard_max_rows"], HARD_MAX_ROWS)
+        # unknown method: 404 located to the method entry
+        status, out = self.call("POST", "/api/touch-searches", {
+            "methods": [{"method_id": 999999}], "max_leads": 5}, expect=404)
+        self.assertEqual(out["code"], "not_found")
+        self.assertEqual(out["method"], 0)
+        # bad limits
+        for body in ({"methods": [{"method_id": self.pb["id"]}]},
+                     {"methods": [{"method_id": self.pb["id"]}],
+                      "max_leads": 0},
+                     {"methods": [{"method_id": self.pb["id"]}],
+                      "max_leads": 5, "min_leads": 6},
+                     {"methods": [], "max_leads": 5}):
+            status, out = self.call("POST", "/api/touch-searches", body,
+                                    expect=400)
+            self.assertIn(out["code"], ("bad_limit", "bad_search"))
+        # nothing rejected was stored
+        status, lst = self.call("GET", "/api/touch-searches")
+        self.assertEqual(len(lst["touch_searches"]), n_before)
+
+    def test_25_scheme_ranking_stage_check_and_download(self):
+        # a music scheme ranks candidates by score first
+        status, scheme = self.call("POST", "/api/schemes", {
+            "name": "search-music", "stage": 6, "rules": [
+                {"name": "front up", "kind": "run", "direction": "up",
+                 "position": "front", "min_length": 4, "weight": 2}]})
+        body = self.search_body(scheme_id=scheme["id"], max_results=500)
+        status, s = self.call("POST", "/api/touch-searches", body)
+        self.assertEqual(status, 201)
+        scores = [c["music_score"] for c in s["results"]]
+        self.assertEqual(scores, sorted(scores, reverse=True))
+        self.assertTrue(all(v is not None for v in scores))
+        # scheme on another stage is rejected before any search
+        status, gd = self.call("POST", "/api/methods",
+                               {"name": "Search GD2", "stage": 5,
+                                "notation": "3.1.5.1.5.1.5.1.5.125"})
+        status, s5 = self.call("POST", "/api/analyses",
+                               {"method_id": gd["id"]})
+        status, scheme5 = self.call("POST", "/api/schemes", {
+            "name": "five", "stage": 5,
+            "rules": [{"name": "r", "kind": "row", "row": "12345"}]})
+        status, out = self.call("POST", "/api/touch-searches", {
+            "methods": [{"method_id": self.pb["id"]}], "max_leads": 5,
+            "scheme_id": scheme5["id"]}, expect=400)
+        self.assertEqual(out["code"], "bad_rule")
+        # unknown search id on every read route is a 404
+        for path in ("", "/candidates", "/download"):
+            status, out = self.call("GET",
+                                    f"/api/touch-searches/9999{path}",
+                                    expect=404)
+            self.assertEqual(out["code"], "not_found")
+        # download: attachment + full report
+        status, s = self.call("POST", "/api/touch-searches", self.search_body())
+        req = urllib.request.Request(
+            self.base + f"/api/touch-searches/{s['id']}/download")
+        with urllib.request.urlopen(req) as resp:
+            self.assertEqual(resp.status, 200)
+            self.assertIn("attachment", resp.headers["Content-Disposition"])
+            payload = json.loads(resp.read().decode())
+        self.assertEqual(payload["report"]["result_count"], s["result_count"])
+        self.assertIn("config", payload)
 
 
 if __name__ == "__main__":

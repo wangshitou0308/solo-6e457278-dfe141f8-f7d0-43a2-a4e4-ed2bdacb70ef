@@ -76,8 +76,17 @@ Python 3.8+ 即可运行。支持 **4–12 口钟**（Minimus～Maximus）。
   未命中规则保留零值。`max_rows` 截断时只分析已生成 rows 并标注 `partial`、`checked_rows`
   与 truth 状态，不把局部分数当全量结果。比较仅在同 stage、同方案版本、同评分模型间进行，
   列出各规则得分与命中增减。
+- **Touch 搜索（touch search）**：在 lead 边界对一组**同 stage 方法版本**分支，每个方法除隐式
+  `plain` 外可定义**命名 call**（lead 内替换的单个 change 与一个单-change 记号）。每个分支接续
+  前一 lead 末行并累计 seen rows；非闭合重复（`repeat`）或过早回到 start_row
+  （`premature_rounds`）剪枝，在 `min_leads` 前闭合剪枝（`below_min_leads`），到 `max_leads`
+  未闭合剪枝（`lead_limit`）。闭合无重复的候选按可选方案的**音乐分（desc）、call 数、切换数**
+  排序，列出逐 lead 决策与 lead head；报告给出剪枝原因计数与探索统计。探索预算 `max_states` 或
+  结果上限 `max_results` 触顶时标记 `truncated`（**绝不据此判定无解**；只有未触顶的
+  `exhausted` 才是确定结论）。stage 不一、call 越界/非单个 change、最长路径超过
+  1,000,000 rows 一律拒绝搜索。候选可**转存**为普通 spliced touch（call 变为段内 override）。
 - **持久化**：SQLite 保存方法版本（同名自动递增 version）、全部分析报告、spliced touch、
-  评分方案版本与音乐分析结果。
+  评分方案版本、音乐分析结果与 touch 搜索作业。
 - **比较与下载**：比较两版的周期与重复位置、比较两次 touch、比较两个音乐分析结果；
   报告均可下载为 JSON。
 
@@ -91,7 +100,7 @@ python3 server.py --host 127.0.0.1 --port 8000 --db ringing.db
 测试与演示：
 
 ```bash
-python3 tests.py       # 95 个单元/接口测试
+python3 tests.py       # 115 个单元/接口测试
 python3 examples.py    # 端到端演示（需先启动 server）
 ```
 
@@ -145,6 +154,12 @@ python3 examples.py    # 端到端演示（需先启动 server）
 | GET | `/api/touches/{id}/rows?segment=2&from=0&to=60` | 逐行结果：`segment` 按区段过滤，`from`/`to` 按行号切片 |
 | GET | `/api/touches/{id}/download` | 下载 touch 报告 JSON（attachment） |
 | GET/POST | `/api/touches/compare` | 比较两次 touch：`?a=1&b=2`（touch id） |
+| POST | `/api/touch-searches` | touch 搜索：`{"methods":[{"method_id":1,"calls":[{"name":"bob","change":12,"notation":"14"}]}],"min_leads"?:1,"max_leads":5,"max_states"?:100000,"max_results"?:100,"scheme_id"?,"start_row"?}` |
+| GET | `/api/touch-searches?stage=&scheme_id=` | 列出搜索作业（摘要、候选概要、剪枝计数与探索统计） |
+| GET | `/api/touch-searches/{id}` | 完整搜索报告（`?offset=&limit=` 对候选分页，缺省 20） |
+| GET | `/api/touch-searches/{id}/candidates?offset=0&limit=20` | 候选分页（含逐 lead 决策与 lead head） |
+| POST | `/api/touch-searches/{id}/export` | 把候选（`{"index":0}`，缺省 0）重放为真实 touch 并落库 |
+| GET | `/api/touch-searches/{id}/download` | 下载搜索报告 JSON（attachment） |
 | POST | `/api/schemes` | 创建音乐性评分方案版本：`{"name","stage"?, "rules":[…]}`（同名自动递增 version） |
 | GET | `/api/schemes?stage=6` | 列出方案版本（可按 stage 过滤） |
 | GET | `/api/schemes/{id}` | 方案详情（含规范化后的规则） |
@@ -474,9 +489,82 @@ touch 报告要点：
   `GET /api/touches/compare?a=1&b=2` 比较两次 touch 的规模、闭合、truth、
   首次重复位置与方法交集（`methods_overlap`）。
 
+## Touch 搜索（touch search）
+
+在 **lead 边界**对一组**同 stage 方法版本**做分支搜索，寻找真实闭合 touch（来 rounds、全程无重复
+row）。每个方法除隐式的 `plain`（按记号原样敲）外，可定义若干**命名 call**：
+
+```bash
+curl -s -X POST localhost:8000/api/touch-searches -d '{
+  "methods": [
+    {"method_id": 1, "calls": [
+      {"name": "bob", "change": 12, "notation": "14"},
+      {"name": "single", "change": 12, "notation": "1234"}]}],
+  "min_leads": 1, "max_leads": 5}'
+```
+
+- `methods[].calls[]`：`name` 是 call 名（`plain` 保留）；`change` 是 lead 内被替换的 change
+  （1 起，不得超出该方法的 lead 长度）；`notation` 必须**恰好解析为一个 change**。
+- 每个 lead 尝试每个（方法，plain/call）选项，**接续前一 lead 末行**展开，并把该 lead 的 rows
+  并入累计 seen 集合。切换（相邻 lead 方法不同）只发生在 lead 边界。
+- lead 范围：`max_leads` 必填，`min_leads` 缺省 1；探索预算 `max_states`（缺省 100,000，
+  尝试的 lead 分支数）与结果上限 `max_results`（缺省 100）；`scheme_id` 可选，`start_row` 缺省 rounds。
+
+### 剪枝与结论
+
+| 剪枝原因 | 含义 |
+|---|---|
+| `repeat` | lead 内（含 lead 末行）出现已经敲过的 row 且未闭合 |
+| `premature_rounds` | lead 中途（非 lead 边界）回到 start_row |
+| `below_min_leads` | 真实闭合但 lead 数小于 `min_leads` |
+| `lead_limit` | 到达 `max_leads` 仍未闭合 |
+
+只有在 lead 边界、lead 范围内回到 start_row 且其它 row 全不重复的分支才成为候选。
+`status`：
+
+- `ok`：预算未触顶且至少有一个候选；
+- `exhausted`：预算未触顶、探索完整但无候选——**该 lead 范围内确定无解**；
+- `truncated`：触及 `max_states` 或 `max_results`（见 `truncated_reason`），结果只是已找到的部分，
+  **绝不表示无解**；`prune_reasons`/`stats`（`states_used`、`max_depth_reached`、
+  `branching_factor`、`candidates_found`）随报告给出。
+
+### 排序、候选与转存
+
+候选依次按**方案音乐分降序**（无方案视为 0）、**call 数升序**、**切换数升序**、lead 数升序与
+决策字典序排序。每个候选给出 `leads`/`rows`/`calls`/`switches`、`music_score`/`music_hits`
+与逐 lead `decisions`（方法版本、plain/call、被替换 change 与记号、`lead_head`）。
+列表接口只给候选概要，完整决策用候选分页接口读取：
+
+```bash
+curl -s 'localhost:8000/api/touch-searches/1/candidates?offset=1&limit=1'
+# 把第 2 个候选（经典 3-bob、36 行）重放为普通 spliced touch
+curl -s -X POST localhost:8000/api/touch-searches/1/export -d '{"index":1}'
+curl -sOJ localhost:8000/api/touch-searches/1/download
+```
+
+转存按相邻同方法 lead 归并成区段，call 成为段内 `overrides`（lead 按段内计），随后可走 touch
+的逐行/比较/评分/下载接口；转存结果会再以统一 truth 校验，必然真实闭合。
+
+### 拒绝搜索（不落库）
+
+| code | 触发 |
+|---|---|
+| `stage_mismatch` | 方法版本 stage 不一（附 `method`/`stage`/`expected`） |
+| `bad_call` | call 的 `change` 越界、记号不止一个 change、名为 `plain`、重名（附 `method`/`call` 0 起定位） |
+| `too_large` | 最长可能路径 `max_leads × 最长 lead` 超过 1,000,000 rows（附 `max_possible_rows`） |
+| `bad_limit` | lead 范围或上限非法 |
+| 404 `not_found` | 方法版本不存在（附 0 起 `method` 定位） |
+
+```json
+{"code":"bad_call","method":0,"call":0,"field":"change","change":99,"lead_length":12,
+ "error":"call 'bob': change must be between 1 and 12 (the lead length)"}
+{"code":"too_large","max_possible_rows":1000020,"hard_max_rows":1000000,
+ "max_leads":50001,"max_lead_length":20,"error":"longest possible path is ..."}
+```
+
 ## 存储
 
-SQLite（默认 `ringing.db`）五张表：
+SQLite（默认 `ringing.db`）六张表：
 
 - `methods`：每个方法版本一行（`name`+`version` 唯一），保存 stage、notation、
   start_row、创建时间。
@@ -488,15 +576,17 @@ SQLite（默认 `ringing.db`）五张表：
   规范化规则 JSON。
 - `music_analyses`：每次音乐分析一行，保存种类（analysis/touch）、stage、
   被评分对象 id、方案 id/版本、partial 标志、总分与完整结果 JSON。
+- `touch_searches`：每次 touch 搜索一行，保存 stage、配置原文（methods/calls/范围/
+  scheme_id）、范围与上限、scheme_id、状态、truncated 标志、候选数与完整报告 JSON。
 
 ## 文件
 
 | 文件 | 说明 |
 |---|---|
-| `ringing.py` | 核心引擎：记号解析、rows 展开、truth 检查、spliced touch、**音乐性评分方案/打分/比较**、比较 |
-| `db.py` | SQLite 持久化（方法版本 + 分析报告 + touch 报告 + 评分方案 + 音乐分析） |
+| `ringing.py` | 核心引擎：记号解析、rows 展开、truth 检查、spliced touch、**音乐性评分方案/打分/比较**、**touch 搜索（lead 边界分支/剪枝/排序）**、比较 |
+| `db.py` | SQLite 持久化（方法版本 + 分析报告 + touch 报告 + 评分方案 + 音乐分析 + **touch 搜索作业**） |
 | `server.py` | HTTP API（`http.server`）与文档页 |
-| `tests.py` | 单元测试 + 接口测试（95 个） |
+| `tests.py` | 单元测试 + 接口测试（115 个） |
 | `examples.py` | 端到端演示客户端（含 10/12 口演示） |
 | `analysis-1.json` | 样例报告：6 口 Plain Bob Minor plain course |
 | `analysis-royal-10.json` | 样例报告：10 口 Plain Bob Royal，180 行闭合、true |

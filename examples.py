@@ -312,6 +312,89 @@ def main():
         fh.write(payload)
     print(f"\ndownloaded music result -> {fname} ({len(payload)} bytes)")
 
+    # 25. touch search: branch on plain / a bob / a single at each lead
+    #     boundary; non-closing repeats and premature rounds are pruned
+    search = call("POST", "/api/touch-searches", {
+        "methods": [{"method_id": m1["id"], "calls": [
+            {"name": "bob", "change": 12, "notation": "14"},
+            {"name": "single", "change": 12, "notation": "1234"}]}],
+        "min_leads": 1, "max_leads": 5})
+    show("touch search (plain course + 3-call touches)", {
+        "id": search["id"], "status": search["status"],
+        "truncated": search["truncated"],
+        "result_count": search["result_count"],
+        "branching_factor": search["branching_factor"],
+        "prune_reasons": search["prune_reasons"], "stats": search["stats"]})
+    print("\n=== ranked candidates ===")
+    for c in search["results"]:
+        print(f"  #{c['index']}: {c['leads']} leads, {c['rows']} rows, "
+              f"{c['calls']} calls, {c['switches']} switches -> {c['end_row']}")
+
+    # 26. read one candidate's lead-by-lead decisions and export it as a touch
+    page = call("GET",
+                f"/api/touch-searches/{search['id']}/candidates?offset=1&limit=1")
+    cand = page["candidates"][0]
+    print(f"\n=== candidate #{cand['index']} lead decisions ===")
+    for d in cand["decisions"]:
+        print(f"  lead {d['lead']}: {d['method']} v{d['version']} "
+              f"{d['call']:<6} lead head {d['lead_head']}")
+    exported = call("POST",
+                    f"/api/touch-searches/{search['id']}/export",
+                    {"index": cand["index"]})
+    show("exported as a stored spliced touch", {
+        "touch_id": exported["id"], **{k: exported[k] for k in
+        ("status", "closed", "total_rows", "total_leads", "segment_count",
+         "exported_from")}})
+
+    # 27. a small exploration budget truncates (never means "no solution")
+    capped = call("POST", "/api/touch-searches", {
+        "methods": [{"method_id": m1["id"], "calls": [
+            {"name": "bob", "change": 12, "notation": "14"}]}],
+        "min_leads": 1, "max_leads": 5, "max_states": 20})
+    show("truncated search (partial, not exhaustive)", capped,
+         ["id", "status", "truncated", "truncated_reason", "result_count",
+          "prune_reasons"])
+
+    # 28. music-ranked search: candidates order by score, then calls/switches
+    ranked = call("POST", "/api/touch-searches", {
+        "methods": [{"method_id": m1["id"]}],
+        "min_leads": 5, "max_leads": 5, "scheme_id": scheme["id"],
+        "max_results": 10})
+    print("\n=== music-ranked candidates ===")
+    for c in ranked["results"]:
+        print(f"  #{c['index']}: score {c['music_score']} "
+              f"({c['music_hits']} hits), {c['calls']} calls, "
+              f"{c['switches']} switches")
+
+    # 29. invalid searches are refused and never stored: a call whose change
+    #     is outside the lead, and a path longer than the 1,000,000-row cap
+    try:
+        call("POST", "/api/touch-searches", {
+            "methods": [{"method_id": m1["id"], "calls": [
+                {"name": "bad", "change": 99, "notation": "14"}]}],
+            "max_leads": 5})
+    except urllib.error.HTTPError as e:
+        show("rejected: call change out of range",
+             json.loads(e.read().decode()), ["code", "method", "call",
+                                             "change", "lead_length"])
+    try:
+        call("POST", "/api/touch-searches",
+             {"methods": [{"method_id": royal["id"]}], "max_leads": 50001})
+    except urllib.error.HTTPError as e:
+        show("rejected: longest path over 1,000,000 rows",
+             json.loads(e.read().decode()),
+             ["code", "max_possible_rows", "hard_max_rows"])
+
+    # 30. download the full search report
+    req = urllib.request.Request(
+        BASE + f"/api/touch-searches/{search['id']}/download")
+    with urllib.request.urlopen(req) as resp:
+        payload = resp.read()
+        fname = resp.headers["Content-Disposition"].split("filename=")[-1].strip('"')
+    with open(fname, "wb") as fh:
+        fh.write(payload)
+    print(f"\ndownloaded touch search -> {fname} ({len(payload)} bytes)")
+
 
 if __name__ == "__main__":
     main()

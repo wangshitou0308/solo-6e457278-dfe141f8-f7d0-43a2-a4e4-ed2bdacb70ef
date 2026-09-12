@@ -17,11 +17,13 @@ from urllib.parse import urlparse, parse_qs
 
 from db import Store
 from ringing import (HARD_MAX_ROWS, LimitRequiredError, NotationError,
-                     SchemeError, SplicedError, analyze, analyze_spliced,
-                     compact_bells, compare_music, compare_reports,
-                     compare_touch_reports, parse_notation, parse_row,
-                     parse_scheme, row_str, rule_to_dict, score_analysis,
-                     score_touch, SCORING_VERSION)
+                     SchemeError, SplicedError, TouchSearchError, analyze,
+                     analyze_spliced, compact_bells, compare_music,
+                     compare_reports, compare_touch_reports, parse_notation,
+                     parse_row, parse_scheme, row_str, rule_to_dict,
+                     score_analysis, score_touch, search_touches,
+                     SCORING_VERSION, SEARCH_DEFAULT_MAX_RESULTS,
+                     SEARCH_DEFAULT_MAX_STATES)
 
 DOCS_HTML = """<!doctype html>
 <html lang="zh">
@@ -160,6 +162,31 @@ change 覆盖（<code>overrides</code>，lead 从 1 起按段内计）。所有�
 未应用覆盖（<code>unapplied_overrides</code>，如同一 change 被后续覆盖取代）。</li>
 </ul>
 
+<h2>Touch 搜索（touch search）</h2>
+<p>在 <strong>lead 边界</strong>对一组同 stage 的方法版本与命名 call 做分支搜索，寻找真实闭合 touch。每个方法除了隐式的
+<code>plain</code>（不改记号）外，可定义若干<strong>命名 call</strong>：每个 call 指定 lead 内替换的
+<strong>单个 change</strong>（1 起）与一个<strong>恰好一个 change</strong>的记号（如 bob <code>14</code>）。
+每个分支接续前一 lead 的末行，并累计已敲 rows（<code>seen</code>）。</p>
+<ul>
+<li><strong>剪枝</strong>：lead 内（含 lead 末行）出现已敲 row 且非闭合 → <code>repeat</code>；lead 中途回到
+start_row → <code>premature_rounds</code>；在 <code>min_leads</code> 之前闭合 → <code>below_min_leads</code>；
+走到 <code>max_leads</code> 仍未闭合 → <code>lead_limit</code>。只有在 lead 边界、lead 范围内回到
+start_row 且全程无重复的分支才是候选。</li>
+<li><strong>排序</strong>：给了 <code>scheme_id</code> 时先按方案音乐分（desc），再按 call 数（asc）、
+切换数（相邻 lead 方法不同的次数，asc）、lead 数（asc）与决策字典序；无方案时音乐分视为 0。</li>
+<li>每个候选列出逐 lead 决策（方法版本、plain/call、替换的 change 与记号、lead head）、call/switch 计数与
+（可选）音乐分；报告给出各剪枝原因计数与探索统计（尝试的分支数、到达深度、分支因子）。</li>
+<li><strong>上限</strong>：<code>max_leads</code> 必填；<code>min_leads</code>（缺省 1）；探索预算
+<code>max_states</code>（缺省 100,000）与结果上限 <code>max_results</code>（缺省 100）。触及任一上限即停止并标记
+<code>truncated:true</code>（<code>truncated_reason</code> 为 <code>max_states</code>/<code>max_results</code>），
+此时<strong>绝不表示无解</strong>——只有预算未触顶且无候选（<code>status:"exhausted"</code>）才是该范围内的确定结论。</li>
+<li><strong>拒绝搜索</strong>：方法 stage 不一（<code>stage_mismatch</code>）、call 的 change 越界或记号不止
+一个 change（<code>bad_call</code>）、最长可能路径（max_leads × 最长 lead）超过 1,000,000 rows
+（<code>too_large</code>）、方法不存在（404）。</li>
+<li>候选可<strong>转存</strong>为普通 spliced touch（按相邻同方法 lead 归并为区段，call 成为段内 override），
+随后可用 touch 的逐行/比较/评分/下载接口。</li>
+</ul>
+
 <h2>接口一览</h2>
 <table>
 <tr><th>方法</th><th>路径</th><th>说明</th></tr>
@@ -179,6 +206,12 @@ change 覆盖（<code>overrides</code>，lead 从 1 起按段内计）。所有�
 <tr><td class="tag get">GET</td><td><code>/api/touches/{id}/rows?segment=2&amp;from=0&amp;to=60</code></td><td>逐行结果，可按区段过滤、按行号切片</td></tr>
 <tr><td class="tag get">GET</td><td><code>/api/touches/{id}/download</code></td><td>下载 touch 报告 JSON（attachment）</td></tr>
 <tr><td class="tag get">GET</td><td><code>/api/touches/compare?a=1&amp;b=2</code></td><td>比较两次 touch 的规模、闭合、truth 与首次重复位置；也支持 POST <code>{"a":1,"b":2}</code></td></tr>
+<tr><td class="tag post">POST</td><td><code>/api/touch-searches</code></td><td>touch 搜索。Body: <code>{"methods":[{"method_id":1,"calls":[{"name":"bob","change":12,"notation":"14"}]}],"max_leads":5,"min_leads"?:1,"max_states"?:100000,"max_results"?:100,"scheme_id"?,"start_row"?, "name"?}</code></td></tr>
+<tr><td class="tag get">GET</td><td><code>/api/touch-searches?stage=&amp;scheme_id=</code></td><td>列出搜索作业（摘要 + 候选概要 + 剪枝/统计）</td></tr>
+<tr><td class="tag get">GET</td><td><code>/api/touch-searches/{id}</code></td><td>完整搜索报告（候选页支持 <code>?offset=&amp;limit=</code>，缺省 20）</td></tr>
+<tr><td class="tag get">GET</td><td><code>/api/touch-searches/{id}/candidates?offset=0&amp;limit=20</code></td><td>候选分页（含逐 lead 决策与 lead head）</td></tr>
+<tr><td class="tag post">POST</td><td><code>/api/touch-searches/{id}/export</code></td><td>把候选（Body <code>{"index":0}</code>，缺省 0）重放为真实 touch 并落库</td></tr>
+<tr><td class="tag get">GET</td><td><code>/api/touch-searches/{id}/download</code></td><td>下载搜索报告 JSON（attachment）</td></tr>
 <tr><td class="tag post">POST</td><td><code>/api/schemes</code></td><td>创建音乐性评分<strong>方案版本</strong>（同名自动递增 version）。Body: <code>{"name":"minor-music","stage":6,"rules":[…]}</code>（stage 也可改传 <code>analysis_id</code>/<code>touch_id</code> 继承）</td></tr>
 <tr><td class="tag get">GET</td><td><code>/api/schemes?stage=6</code></td><td>列出方案版本（可按 stage 过滤）</td></tr>
 <tr><td class="tag get">GET</td><td><code>/api/schemes/{id}</code></td><td>方案详情（含规范化后的全部规则）</td></tr>
@@ -306,6 +339,39 @@ curl -sOJ localhost:8000/api/music/1/download</pre>
 {"code":"bad_rule","error":"bell 5 appears more than once in the row",
  "rule":0,"field":"row","token":"5","offset":5}</pre>
 
+<h2>示例：touch 搜索与转存</h2>
+<pre># 在 Plain Bob Minor 上搜索：plain / bob(14) / single(1234)，1..5 个 lead
+curl -s -X POST localhost:8000/api/touch-searches -d '{
+  "methods": [{"method_id": 1, "calls": [
+    {"name": "bob", "change": 12, "notation": "14"},
+    {"name": "single", "change": 12, "notation": "1234"}]}],
+  "min_leads": 1, "max_leads": 5}'
+# -> {"status":"ok","truncated":false,"result_count":5,
+#     "prune_reasons":{"repeat":28,"premature_rounds":0,
+#                      "below_min_leads":0,"lead_limit":162},
+#     "results":[{"index":0,"leads":5,"calls":0,"switches":0,"end_row":"123456",...},
+#                {"index":1,"leads":3,"calls":3,"switches":0,"end_row":"123456",...}]}
+
+# 看第 2 个候选的逐 lead 决策（分页）
+curl -s 'localhost:8000/api/touch-searches/1/candidates?offset=1&amp;limit=1'
+
+# 把它转存为普通 touch（随后可逐行/比较/评分/下载）
+curl -s -X POST localhost:8000/api/touch-searches/1/export -d '{"index":1}'
+
+# 小预算被截断：truncated=true 且不是“无解”
+curl -s -X POST localhost:8000/api/touch-searches -d '{
+  "methods":[{"method_id":1,"calls":[{"name":"bob","change":12,"notation":"14"}]}],
+  "min_leads":1,"max_leads":5,"max_states":20,"max_results":100}'
+# -> {"status":"truncated","truncated":true,"truncated_reason":"max_states",...}
+
+# 非法配置：call 越界 / 非单个 change / stage 不一 / 路径过长
+# {"code":"bad_call","method":0,"call":0,"change":99,"lead_length":12,...}
+# {"code":"too_large","max_possible_rows":...,"hard_max_rows":1000000,...}
+# {"code":"stage_mismatch","method":1,"stage":5,"expected":6,...}
+
+# 下载完整搜索报告
+curl -sOJ localhost:8000/api/touch-searches/1/download</pre>
+
 <p>更多说明见仓库 <code>README.md</code>；演示脚本：<code>python3 examples.py</code>。</p>
 </body>
 </html>
@@ -313,7 +379,7 @@ curl -sOJ localhost:8000/api/music/1/download</pre>
 
 API_INDEX = {
     "name": "Change Ringing Method Validator API",
-    "version": "1.2",
+    "version": "1.3",
     "min_stage": 4,
     "max_stage": 12,
     "hard_max_rows": HARD_MAX_ROWS,
@@ -338,6 +404,12 @@ API_INDEX = {
         "GET  /api/touches/{id}/rows?segment=&from=&to=",
         "GET  /api/touches/{id}/download",
         "GET  /api/touches/compare?a=&b=  (or POST)",
+        "POST /api/touch-searches",
+        "GET  /api/touch-searches?stage=&scheme_id=",
+        "GET  /api/touch-searches/{id}",
+        "GET  /api/touch-searches/{id}/candidates?offset=&limit=",
+        "POST /api/touch-searches/{id}/export",
+        "GET  /api/touch-searches/{id}/download",
         "POST /api/schemes",
         "GET  /api/schemes?stage=",
         "GET  /api/schemes/{id}",
@@ -835,6 +907,286 @@ def api_compare_touches(handler, query, body):
             "comparison": comparison}, 200
 
 
+# ----------------------------------------------------------- touch searches
+def _get_search_or_404(store, search_id):
+    rec = store.get_touch_search(search_id)
+    if rec is None:
+        raise ApiError(404, f"touch search {search_id} not found", "not_found")
+    return rec
+
+
+def _search_candidate_brief(candidate):
+    return {"index": candidate["index"], "leads": candidate["leads"],
+            "rows": candidate["rows"], "calls": candidate["calls"],
+            "switches": candidate["switches"], "closed": candidate["closed"],
+            "true": candidate["true"], "end_row": candidate["end_row"],
+            "music_score": candidate["music_score"],
+            "music_hits": candidate["music_hits"]}
+
+
+def _search_summary(rec):
+    rep = rec["report"]
+    return {"id": rec["id"], "created_at": rec["created_at"],
+            "stage": rec["stage"], "status": rec["status"],
+            "truncated": rec["truncated"],
+            "truncated_reason": rep["truncated_reason"],
+            "min_leads": rec["min_leads"], "max_leads": rec["max_leads"],
+            "max_states": rec["max_states"], "max_results": rec["max_results"],
+            "scheme_id": rec["scheme_id"], "result_count": rec["result_count"],
+            "lead_range": rep["lead_range"],
+            "branching_factor": rep["branching_factor"],
+            "prune_reasons": rep["prune_reasons"], "stats": rep["stats"],
+            "results": [_search_candidate_brief(c) for c in rep["results"]]}
+
+
+def _positive_int_field(body, field, default=None):
+    if field not in body or body[field] is None:
+        return default
+    value = body[field]
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ApiError(400, f"{field} must be a positive integer", "bad_limit",
+                       {"field": field})
+    return value
+
+
+def api_create_touch_search(handler, query, body):
+    """Search for true closing touches by branching on methods and calls.
+
+    Body: {"methods": [{"method_id", "calls": [
+               {"name", "change", "notation"}, ...]}, ...],
+           "start_row"?, "min_leads"?, "max_leads",
+           "max_states"?, "max_results"?, "scheme_id"?, "name"?}
+    Every searched method version must be on the same stage; "plain" (the
+    unmodified lead) is always offered alongside the named calls.  Nothing is
+    searched when the configuration is invalid (stage mismatch, bad call,
+    out-of-range change, non-single-change notation, over-size path).
+    """
+    store = handler.server.store
+    if not isinstance(body, dict):
+        raise ApiError(400, "request body must be a JSON object", "bad_field")
+    methods_spec = _require(body, "methods")
+    if not isinstance(methods_spec, list) or not methods_spec:
+        raise ApiError(400, "methods must be a non-empty list", "bad_search")
+    max_leads = _positive_int_field(body, "max_leads")
+    if max_leads is None:
+        raise ApiError(400, "max_leads is required and must be a positive integer",
+                       "bad_limit", {"field": "max_leads"})
+    min_leads = _positive_int_field(body, "min_leads", default=1)
+    max_states = _positive_int_field(
+        body, "max_states", default=SEARCH_DEFAULT_MAX_STATES)
+    max_results = _positive_int_field(
+        body, "max_results", default=SEARCH_DEFAULT_MAX_RESULTS)
+    if min_leads > max_leads:
+        raise ApiError(400, "min_leads must not be greater than max_leads",
+                       "bad_limit", {"field": "min_leads", "min_leads": min_leads,
+                                     "max_leads": max_leads})
+    # resolve every method version before searching; an unknown id is a 404
+    # located to its 0-based entry in the methods list
+    resolved = []
+    stage = None
+    for mi, spec in enumerate(methods_spec):
+        if not isinstance(spec, dict):
+            raise ApiError(400, f"method {mi} must be an object", "bad_search",
+                           {"method": mi})
+        method_id = spec.get("method_id")
+        if isinstance(method_id, bool) or not isinstance(method_id, int):
+            raise ApiError(400, f"method {mi}: method_id must be an integer",
+                           "bad_search", {"method": mi})
+        method = store.get_method(method_id)
+        if method is None:
+            raise ApiError(404,
+                           f"method {method_id} not found", "not_found",
+                           {"method": mi, "method_id": method_id})
+        if stage is None:
+            stage = method["stage"]
+        elif method["stage"] != stage:
+            raise ApiError(400,
+                           f"stage mismatch: method {mi} is on "
+                           f"{method['stage']} bells, the search is on {stage}",
+                           "stage_mismatch",
+                           {"method": mi, "stage": method["stage"],
+                            "expected": stage})
+        calls = spec.get("calls") or []
+        if not isinstance(calls, list):
+            raise ApiError(400, "calls must be a list", "bad_call",
+                           {"method": mi})
+        resolved.append({"method_id": method["id"], "name": method["name"],
+                         "version": method["version"], "stage": method["stage"],
+                         "notation": method["notation"], "calls": calls})
+    # optional scheme: only used to rank candidates by music score
+    scheme = None
+    scheme_id = None
+    scheme_version = None
+    if body.get("scheme_id") is not None:
+        scheme_id = _validate_id(body["scheme_id"], "scheme_id")
+        scheme_rec = _get_scheme_or_404(store, scheme_id)
+        if scheme_rec["stage"] != stage:
+            raise ApiError(400,
+                           f"stage mismatch: scheme is on {scheme_rec['stage']} "
+                           f"bells, the search is on {stage}", "bad_rule",
+                           {"field": "scheme", "stage": scheme_rec["stage"],
+                            "expected": stage})
+        scheme = _normalized_scheme(scheme_rec)
+        scheme_version = scheme_rec["version"]
+    start_row = body.get("start_row")
+    try:
+        report = search_touches(
+            resolved, start_row=start_row, min_leads=min_leads,
+            max_leads=max_leads, max_states=max_states,
+            max_results=max_results, scheme=scheme)
+    except TouchSearchError as err:
+        extra = {k: v for k, v in err.to_dict().items() if k != "error"}
+        raise ApiError(400, err.message, err.code, extra)
+    config = {"name": body.get("name"), "methods": methods_spec,
+              "start_row": report["start_row"], "min_leads": min_leads,
+              "max_leads": max_leads, "max_states": max_states,
+              "max_results": max_results, "scheme_id": scheme_id,
+              "scheme_version": scheme_version}
+    rec = store.create_touch_search(
+        report["stage"], config, min_leads, max_leads, max_states,
+        max_results, scheme_id, report["status"], report["truncated"],
+        report["result_count"], report)
+    out = _search_summary(rec)
+    out["links"] = {
+        "report": f"/api/touch-searches/{rec['id']}",
+        "candidates": f"/api/touch-searches/{rec['id']}/candidates",
+        "export": f"/api/touch-searches/{rec['id']}/export",
+        "download": f"/api/touch-searches/{rec['id']}/download",
+    }
+    return out, 201
+
+
+def api_list_touch_searches(handler, query, body):
+    store = handler.server.store
+
+    def _opt_int(name):
+        if name not in query:
+            return None
+        try:
+            return int(query[name][0])
+        except ValueError:
+            raise ApiError(400, f"{name} must be an integer", "bad_field")
+
+    recs = store.list_touch_searches(stage=_opt_int("stage"),
+                                     scheme_id=_opt_int("scheme_id"))
+    return {"touch_searches": [_search_summary(r) for r in recs]}, 200
+
+
+def _paginate_results(results, query, default_limit=20, max_limit=500):
+    """Offset/limit pagination over stored candidate results."""
+    try:
+        offset = int(query["offset"][0]) if "offset" in query else 0
+        limit = int(query["limit"][0]) if "limit" in query else default_limit
+    except ValueError:
+        raise ApiError(400, "offset/limit must be integers", "bad_field")
+    if offset < 0 or limit < 1:
+        raise ApiError(400, "offset must be >= 0 and limit >= 1", "bad_field")
+    limit = min(limit, max_limit)
+    return offset, results[offset:offset + limit]
+
+
+def api_get_touch_search(handler, query, body, search_id):
+    rec = _get_search_or_404(handler.server.store, search_id)
+    # the full report may be long; the result page is queryable separately,
+    # but the report itself also honors offset/limit for convenience
+    offset, page = _paginate_results(
+        rec["report"]["results"], query, default_limit=20)
+    report = dict(rec["report"])
+    report["results"] = page
+    report["results_page"] = {"offset": offset, "limit": len(page),
+                              "total": rec["result_count"]}
+    return {"id": rec["id"], "created_at": rec["created_at"],
+            "stage": rec["stage"], "config": rec["config"],
+            "min_leads": rec["min_leads"], "max_leads": rec["max_leads"],
+            "max_states": rec["max_states"], "max_results": rec["max_results"],
+            "scheme_id": rec["scheme_id"], "status": rec["status"],
+            "truncated": rec["truncated"], "report": report}, 200
+
+
+def api_touch_search_candidates(handler, query, body, search_id):
+    rec = _get_search_or_404(handler.server.store, search_id)
+    offset, page = _paginate_results(
+        rec["report"]["results"], query, default_limit=20)
+    return {"id": rec["id"], "status": rec["status"],
+            "truncated": rec["truncated"], "total": rec["result_count"],
+            "offset": offset, "limit": len(page),
+            "candidates": page}, 200
+
+
+def _candidate_segments(candidate):
+    """Group consecutive same-method lead decisions into touch segments."""
+    segments = []
+    for dec in candidate["decisions"]:
+        method_id = dec["method_id"]
+        override = (None if dec["call"] == "plain"
+                    else {"lead": None, "change": dec["change"],
+                          "notation": dec["notation"]})
+        if segments and segments[-1]["method_id"] == method_id:
+            seg = segments[-1]
+            seg["leads"] += 1
+        else:
+            seg = {"method_id": method_id, "leads": 1, "overrides": []}
+            segments.append(seg)
+        if override is not None:
+            override["lead"] = seg["leads"]  # 1-based lead within the segment
+            seg["overrides"].append(override)
+    return segments
+
+
+def api_export_touch_search(handler, query, body, search_id):
+    """Replay one stored candidate as a spliced touch and store the touch."""
+    store = handler.server.store
+    rec = _get_search_or_404(store, search_id)
+    if not isinstance(body, dict):
+        raise ApiError(400, "request body must be a JSON object", "bad_field")
+    index = body.get("index", 0)
+    if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+        raise ApiError(400, "index must be a non-negative integer", "bad_field")
+    if index >= rec["result_count"]:
+        raise ApiError(404,
+                       f"candidate {index} not found (this search has "
+                       f"{rec['result_count']})", "not_found",
+                       {"index": index, "result_count": rec["result_count"]})
+    candidate = rec["report"]["results"][index]
+    segments_spec = _candidate_segments(candidate)
+    # resolve the segment methods (they were searched from stored versions)
+    resolved = []
+    for seg in segments_spec:
+        method = _get_method_or_404(store, seg["method_id"])
+        resolved.append({"method_id": method["id"], "name": method["name"],
+                         "version": method["version"], "stage": method["stage"],
+                         "notation": method["notation"],
+                         "leads": seg["leads"], "overrides": seg["overrides"]})
+    # the search already bounded every path to HARD_MAX_ROWS
+    report = analyze_spliced(resolved, start_row=rec["report"]["start_row"],
+                             max_rows=max(1, candidate["rows"]))
+    if not report["closed"] or report["truth"]["first_repeat"] is not None:
+        # a stored candidate is true-and-closing by construction; a failure
+        # here means a corrupted result, not a normal search outcome
+        raise ApiError(500,
+                       "exported candidate did not replay as true and closed",
+                       "internal", {"status": report["status"]})
+    touch = store.create_touch(report["stage"], segments_spec, candidate["rows"],
+                               report["status"], report)
+    out = _touch_summary(touch)
+    out["exported_from"] = {"search_id": rec["id"], "candidate_index": index}
+    out["links"] = {
+        "report": f"/api/touches/{touch['id']}",
+        "rows": f"/api/touches/{touch['id']}/rows",
+        "download": f"/api/touches/{touch['id']}/download",
+    }
+    return out, 201
+
+
+def api_touch_search_download(handler, query, body, search_id):
+    rec = _get_search_or_404(handler.server.store, search_id)
+    payload = {"id": rec["id"], "created_at": rec["created_at"],
+               "stage": rec["stage"], "config": rec["config"],
+               "status": rec["status"], "truncated": rec["truncated"],
+               "report": rec["report"]}
+    return payload, 200, f"touch-search-{rec['id']}.json"
+
+
 # --------------------------------------------------------------- music routes
 def api_create_scheme(handler, query, body):
     if not isinstance(body, dict):
@@ -1046,6 +1398,16 @@ ROUTES = [
     ("GET", re.compile(r"^/api/touches$"), api_list_touches),
     ("GET", re.compile(r"^/api/touches/compare$"), api_compare_touches),
     ("POST", re.compile(r"^/api/touches/compare$"), api_compare_touches),
+    ("POST", re.compile(r"^/api/touch-searches$"), api_create_touch_search),
+    ("GET", re.compile(r"^/api/touch-searches$"), api_list_touch_searches),
+    ("GET", re.compile(r"^/api/touch-searches/(\d+)$"),
+     lambda h, q, b, sid: api_get_touch_search(h, q, b, int(sid))),
+    ("GET", re.compile(r"^/api/touch-searches/(\d+)/candidates$"),
+     lambda h, q, b, sid: api_touch_search_candidates(h, q, b, int(sid))),
+    ("POST", re.compile(r"^/api/touch-searches/(\d+)/export$"),
+     lambda h, q, b, sid: api_export_touch_search(h, q, b, int(sid))),
+    ("GET", re.compile(r"^/api/touch-searches/(\d+)/download$"),
+     lambda h, q, b, sid: api_touch_search_download(h, q, b, int(sid))),
     ("GET", re.compile(r"^/api/touches/(\d+)$"),
      lambda h, q, b, tid: api_get_touch(h, q, b, int(tid))),
     ("GET", re.compile(r"^/api/touches/(\d+)/rows$"),
@@ -1070,7 +1432,7 @@ ROUTES = [
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "RingingAPI/1.2"
+    server_version = "RingingAPI/1.3"
     protocol_version = "HTTP/1.1"
 
     def do_GET(self):
