@@ -86,8 +86,16 @@ Python 3.8+ 即可运行。支持 **4–12 口钟**（Minimus～Maximus）。
   `exhausted` 才是确定结论）。stage 不一、call 越界/非单个 change、最长路径超过
   1,000,000 rows 一律拒绝搜索。候选可**转存**为普通 spliced touch（call 变为段内 override）。
 - **持久化**：SQLite 保存方法版本（同名自动递增 version）、全部分析报告、spliced touch、
-  评分方案版本、音乐分析结果与 touch 搜索作业。
-- **比较与下载**：比较两版的周期与重复位置、比较两次 touch、比较两个音乐分析结果；
+  多部组合复演、评分方案版本、音乐分析结果与 touch 搜索作业。
+- **多部组合复演（multi-part replay）**：从 sqlite3 存档选一个 touch 作为**单部**，经
+  `http.server` 接口指定 `parts` 与总 row 上限，连续重放多部——每部从上一部末行接着展开
+  （逐部重放方法区段与 change 覆盖，**不重置到 start_row**），相邻两部共享的边界 row
+  **只计一次**。报告逐部列出起止 row、由首部起止 row 导出的 **part-end permutation 及其阶**、
+  部界（boundaries）与覆盖来源；对整段检查闭合、跨部重复与提前回到 start_row。`parts` 与排列阶
+  不一致时写明差异（倍数多遍 / 无法闭合），**未闭合结果绝不标为成功**。touch 不存在、参数非法
+  或展开超过 1,000,000 rows 一律拒绝创建且不落库；另提供查询、按部分页读取 rows、结果比较与
+  JSON 下载接口。
+- **比较与下载**：比较两版的周期与重复位置、比较两次 touch、比较两个多部复演、比较两个音乐分析结果；
   报告均可下载为 JSON。
 
 ## 运行
@@ -100,7 +108,7 @@ python3 server.py --host 127.0.0.1 --port 8000 --db ringing.db
 测试与演示：
 
 ```bash
-python3 tests.py       # 115 个单元/接口测试
+python3 tests.py       # 131 个单元/接口测试
 python3 examples.py    # 端到端演示（需先启动 server）
 ```
 
@@ -154,6 +162,12 @@ python3 examples.py    # 端到端演示（需先启动 server）
 | GET | `/api/touches/{id}/rows?segment=2&from=0&to=60` | 逐行结果：`segment` 按区段过滤，`from`/`to` 按行号切片 |
 | GET | `/api/touches/{id}/download` | 下载 touch 报告 JSON（attachment） |
 | GET/POST | `/api/touches/compare` | 比较两次 touch：`?a=1&b=2`（touch id） |
+| POST | `/api/multipart-touches` | 创建多部组合复演：`{"touch_id":1,"parts":5,"start_row"?,"max_rows"?}`（或 `{"segments":[…],"parts":5}`） |
+| GET | `/api/multipart-touches` | 列出多部复演（摘要；`?touch_id=`、`?stage=` 过滤） |
+| GET | `/api/multipart-touches/{id}` | 完整复演报告（含逐行 rows、part_summaries、boundaries、switches） |
+| GET | `/api/multipart-touches/{id}/rows?part=2&segment=1&from=0&to=60` | 按部（可再按段）分页读 rows：`part` 过滤，`from`/`to` 按全局行号切片 |
+| GET | `/api/multipart-touches/{id}/download` | 下载复演报告 JSON（attachment） |
+| GET/POST | `/api/multipart-touches/compare` | 比较两次多部复演：`?a=1&b=2`（replay id） |
 | POST | `/api/touch-searches` | touch 搜索：`{"methods":[{"method_id":1,"calls":[{"name":"bob","change":12,"notation":"14"}]}],"min_leads"?:1,"max_leads":5,"max_states"?:100000,"max_results"?:100,"scheme_id"?,"start_row"?}` |
 | GET | `/api/touch-searches?stage=&scheme_id=` | 列出搜索作业（摘要、候选概要、剪枝计数与探索统计） |
 | GET | `/api/touch-searches/{id}` | 完整搜索报告（`?offset=&limit=` 对候选分页，缺省 20） |
@@ -489,6 +503,110 @@ touch 报告要点：
   `GET /api/touches/compare?a=1&b=2` 比较两次 touch 的规模、闭合、truth、
   首次重复位置与方法交集（`methods_overlap`）。
 
+## 多部组合复演（multi-part replay）
+
+把一个**已存 touch**（经 `/api/touches` 创建，存于 sqlite3）当作**单部**，连续重放
+`parts` 部；也可不经 touch 直接传与 touch 同形的 `segments`。每部**从上一部末行接着
+展开**——逐部重放该 touch 的方法区段与段内 change 覆盖，**绝不把某部重置到
+`start_row`**。相邻两部共享的边界 row **只计一次**：全局共
+`1 + parts × touch_rows` 个 row 条目（`distinct_rows` 即此数），`boundaries` 列出
+`parts-1` 个部界（`counted_once: true`）。
+
+```bash
+# 先把 Plain Bob Minor 的一个 lead 存成 touch，再连续重放 5 部
+curl -s -X POST localhost:8000/api/touches -d '{
+  "segments": [{"method_id": 1, "leads": 1}]}'
+curl -s -X POST localhost:8000/api/multipart-touches \
+  -d '{"touch_id": 1, "parts": 5}'
+```
+
+### 逐部起止、部界与覆盖来源
+
+- `part_summaries` 逐部给出 `from_index`/`to_index`（全局行号区间）、`start_row`/
+  `end_row` 与每段的覆盖应用情况；第 P 部（P>1）的 `start_row` 正是第 P-1 部的
+  `end_row`（同一个 row，不重复存储）。
+- `boundaries` 给部界：`between_parts`、`at_index`、边界 `row`、衔接前后的方法版本。
+- 部内的段间切换（与单部 touch 一样，只在 lead 边界）进 `switches`，每部一份、带全局行号。
+- 段内 `overrides`（bob/single 等）在**每一部都会再次生效**：逐行条目的
+  `override` 为 `{"part","segment","lead","change","notation","replaces_token"}`；
+  覆盖报告记录其**首次**应用的部与全局行号（`part`/`row_index`/`before_row`/
+  `after_row`），同一 change 被多个覆盖指定时后者生效、前者进
+  `unapplied_overrides`。
+
+### part-end permutation（部末排列）及其阶
+
+由**首部**的起止 row 导出敲一部所施加的固定位置排列 Q（起始位置 p 的钟到终止位置 q(p)）。
+其 cycle 结构与阶对任意 `start_row` 相同；从 rounds 敲一部的部末 row 是 Q 的逆行（与 Q
+同阶）。报告 `part_end_permutation` 给出：
+
+| 字段 | 含义 |
+|---|---|
+| `row` | 首部的实际部末 row（随 `start_row` 而定） |
+| `canonical_row` | 从 rounds 敲一部的部末 row（Q 的逆行，规范符号） |
+| `mapping` / `position_mapping` | 位置映射 p→q（紧凑符号 / 整数；对任意 start_row 不变） |
+| `order` | 排列的阶（cycle 长度的 LCM）：Pᵏ 送 rounds 回 rounds 当且仅当 k 是阶的倍数 |
+| `parts_equal_order` | `parts == order` |
+| `order_divides_parts` | `parts` 是阶的倍数 |
+| `consistent` | 闭合与否与“是否倍数”一致 |
+| `note` | 文字说明 parts 与阶的关系 |
+
+### 整段 truth、提前回到 start_row 与 parts/阶差异
+
+truth 对**整段复演**统一判定，绝不用各部各自的结论代替：
+
+- **跨部重复**（`untrue`）：`truth.first_repeat` 的两处位置都带
+  `part`/`segment`/`lead`/`change`/`index`；逐行条目标 `repeat`。
+- **提前回到 start_row**（`premature_rounds`）：除最终行外，任何位置（含部界、lead 边界）
+  回到起始排列都算；`parts` 是阶的倍数且 > 阶时（如阶 5 敲 10 部），第 5 部末已回 rounds，
+  判 `premature_rounds` + `untrue`。
+- **闭合**（`closed`）：仅最终全局行等于 start_row。
+- **parts 与阶不一致**：`problems` 加 `parts_order_mismatch`，`note` 写明差异——
+  是倍数但整周期多遍（仍会提前回 rounds），或根本无法闭合。
+- **未闭合结果绝不标为成功**：只有闭合、无重复、无提前回 rounds 且 `parts == order` 时
+  `status:"ok"`、`success:true`；其余 `success:false`
+  （`not_closed` / `untrue` / `premature_rounds`）。
+
+```json
+{"status":"ok","success":true,"closed":true,"parts":5,"touch_rows":12,
+ "total_rows":60,"distinct_rows":61,"boundary_rows_counted_once":4,
+ "part_end_permutation":{"row":"135264","canonical_row":"135264",
+   "position_mapping":{"1":1,"2":4,"3":2,"4":6,"5":3,"6":5},
+   "order":5,"parts_equal_order":true,"order_divides_parts":true,
+   "consistent":true,"note":"parts equals the part-end permutation order"},
+ "truth":{"true":true,"conclusive":true,"checked_rows":60,"first_repeat":null},
+ "problems":[]}
+```
+
+### 创建、按部分页、比较与下载
+
+```bash
+# 按部读取：part=0 只有 index 0；part P>1 的首页是与上一部共享的边界 row（只存一次）
+curl -s 'localhost:8000/api/multipart-touches/1/rows?part=2'
+curl -s 'localhost:8000/api/multipart-touches/1/rows?part=3&segment=1&from=25&to=30'
+curl -s 'localhost:8000/api/multipart-touches'           # 列表（?touch_id=&stage= 过滤）
+curl -s 'localhost:8000/api/multipart-touches/compare?a=1&b=2'
+curl -sOJ localhost:8000/api/multipart-touches/1/download
+```
+
+比较接口列出双方 parts/规模/闭合/`success`/truth、部末排列是否相同与其阶、
+各自的 parts/阶不一致标记（`parts_order_mismatch_a/b`）及方法交集。
+
+### 拒绝创建（不落库）
+
+| code | 触发 |
+|---|---|
+| 404 `not_found` | `touch_id` 的 touch 不存在（附 `touch_id`）；行内段方法不存在（附 1 起 `segment`） |
+| `bad_parts` | `parts` 缺失或非正整数（附 `parts`） |
+| `bad_segment` | 段/leads/覆盖非法或 stage 不一（沿用 touch 的段定位字段） |
+| `too_large` | `parts × touch_rows` 超过上限（附 `parts`/`part_rows`/`total_rows`/`max_rows`/`hard_max_rows`） |
+| `limit_required` | 10–12 口未显式传 `max_rows`（一个 extent 已超硬上限） |
+
+```json
+{"code":"too_large","parts":83334,"part_rows":12,"total_rows":1000008,
+ "max_rows":1000000,"hard_max_rows":1000000,
+ "error":"total rows 1,000,008 (83,334 parts x 12) exceed the limit of 1,000,000"}
+```
+
 ## Touch 搜索（touch search）
 
 在 **lead 边界**对一组**同 stage 方法版本**做分支搜索，寻找真实闭合 touch（来 rounds、全程无重复
@@ -564,7 +682,7 @@ curl -sOJ localhost:8000/api/touch-searches/1/download
 
 ## 存储
 
-SQLite（默认 `ringing.db`）六张表：
+SQLite（默认 `ringing.db`）七张表：
 
 - `methods`：每个方法版本一行（`name`+`version` 唯一），保存 stage、notation、
   start_row、创建时间。
@@ -572,6 +690,8 @@ SQLite（默认 `ringing.db`）六张表：
   完整报告 JSON。
 - `touches`：每次 spliced touch 一行，保存 stage、区段编排（segments 请求原文）、
   max_rows、状态与完整报告 JSON。
+- `multipart_touches`：每次多部组合复演一行，保存来源 touch id（可空）、stage、
+  单部区段编排（segments 原文）、parts、max_rows、状态与完整报告 JSON。
 - `schemes`：每个音乐性评分方案版本一行（`name`+`version` 唯一），保存 stage 与
   规范化规则 JSON。
 - `music_analyses`：每次音乐分析一行，保存种类（analysis/touch）、stage、
@@ -583,8 +703,8 @@ SQLite（默认 `ringing.db`）六张表：
 
 | 文件 | 说明 |
 |---|---|
-| `ringing.py` | 核心引擎：记号解析、rows 展开、truth 检查、spliced touch、**音乐性评分方案/打分/比较**、**touch 搜索（lead 边界分支/剪枝/排序）**、比较 |
-| `db.py` | SQLite 持久化（方法版本 + 分析报告 + touch 报告 + 评分方案 + 音乐分析 + **touch 搜索作业**） |
+| `ringing.py` | 核心引擎：记号解析、rows 展开、truth 检查、spliced touch、**多部组合复演**、音乐性评分方案/打分/比较、**touch 搜索（lead 边界分支/剪枝/排序）**、比较 |
+| `db.py` | SQLite 持久化（方法版本 + 分析报告 + touch 报告 + **多部复演** + 评分方案 + 音乐分析 + **touch 搜索作业**） |
 | `server.py` | HTTP API（`http.server`）与文档页 |
 | `tests.py` | 单元测试 + 接口测试（115 个） |
 | `examples.py` | 端到端演示客户端（含 10/12 口演示） |

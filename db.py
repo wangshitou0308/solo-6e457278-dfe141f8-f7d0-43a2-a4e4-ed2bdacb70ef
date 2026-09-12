@@ -1,12 +1,14 @@
 """SQLite persistence for the change-ringing API.
 
-Six tables:
-    methods        - one row per method *version* (same name => version +1)
-    analyses       - one row per analysis report, linked to a method version
-    touches        - one row per spliced-touch report, spanning methods
-    schemes        - one row per musicality scoring *scheme version*
-    music_analyses - one row per scored analysis/touch against a scheme version
-    touch_searches - one row per touch-search job: config plus the full report
+Seven tables:
+    methods           - one row per method *version* (same name => version +1)
+    analyses          - one row per analysis report, linked to a method version
+    touches           - one row per spliced-touch report, spanning methods
+    schemes           - one row per musicality scoring *scheme version*
+    music_analyses    - one row per scored analysis/touch against a scheme version
+    touch_searches    - one row per touch-search job: config plus the full report
+    multipart_touches - one row per multi-part replay: the base touch (segments),
+                        part count/cap plus the full replay report
 """
 
 from __future__ import annotations
@@ -81,6 +83,17 @@ CREATE TABLE IF NOT EXISTS touch_searches (
     result_count    INTEGER NOT NULL,
     report          TEXT NOT NULL,
     created_at      TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS multipart_touches (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    touch_id    INTEGER REFERENCES touches(id),
+    stage       INTEGER NOT NULL,
+    segments    TEXT NOT NULL,
+    parts       INTEGER NOT NULL,
+    max_rows    INTEGER,
+    status      TEXT NOT NULL,
+    report      TEXT NOT NULL,
+    created_at  TEXT NOT NULL
 );
 """
 
@@ -320,5 +333,46 @@ class Store:
         rec = dict(row)
         rec["truncated"] = bool(rec["truncated"])
         rec["config"] = json.loads(rec["config"])
+        rec["report"] = json.loads(rec["report"])
+        return rec
+
+    # ------------------------------------------------------ multi-part replays
+    def create_multipart_touch(self, touch_id, stage, segments, parts, max_rows,
+                                status, report):
+        """Store a multi-part replay report; returns the full record."""
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "INSERT INTO multipart_touches (touch_id, stage, segments, parts,"
+                " max_rows, status, report, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (touch_id, stage, json.dumps(segments), parts, max_rows, status,
+                 json.dumps(report), _now()))
+            return self.get_multipart_touch(cur.lastrowid)
+
+    def get_multipart_touch(self, replay_id):
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM multipart_touches WHERE id = ?",
+                (replay_id,)).fetchone()
+        return self._decode_multipart(row) if row else None
+
+    def list_multipart_touches(self, touch_id=None, stage=None):
+        clauses, params = [], []
+        if touch_id is not None:
+            clauses.append("touch_id = ?")
+            params.append(touch_id)
+        if stage is not None:
+            clauses.append("stage = ?")
+            params.append(stage)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT * FROM multipart_touches{where} ORDER BY id",
+                params).fetchall()
+        return [self._decode_multipart(r) for r in rows]
+
+    @staticmethod
+    def _decode_multipart(row):
+        rec = dict(row)
+        rec["segments"] = json.loads(rec["segments"])
         rec["report"] = json.loads(rec["report"])
         return rec

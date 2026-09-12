@@ -395,6 +395,107 @@ def main():
         fh.write(payload)
     print(f"\ndownloaded touch search -> {fname} ({len(payload)} bytes)")
 
+    # 31. multi-part replay: store a touch that is one Plain Bob Minor lead,
+    #     then ring it 5 times back to back.  Each part continues from the
+    #     previous part's last row (a part is never reset to rounds), so the
+    #     shared boundary row counts once and the replay is exactly the
+    #     plain course.
+    one_lead = call("POST", "/api/touches",
+                    {"segments": [{"method_id": m1["id"], "leads": 1}]})
+    replay = call("POST", "/api/multipart-touches",
+                  {"touch_id": one_lead["id"], "parts": 5})
+    show("multi-part replay: one lead replayed 5 times", replay,
+         ["id", "status", "success", "closed", "parts", "touch_rows",
+          "total_rows", "distinct_rows", "boundary_rows_counted_once",
+          "problems"])
+    pep = replay["part_end_permutation"]
+    print("  part-end permutation:", pep["canonical_row"],
+          "order:", pep["order"], "parts == order:",
+          pep["parts_equal_order"], "|", pep["note"])
+    print("  truth:", replay["truth"]["true"], "problems:",
+          replay["problems"], "success:", replay["success"])
+
+    # 32. per-part start/end rows and the boundaries (each counted once)
+    full = call("GET", f"/api/multipart-touches/{replay['id']}")
+    print("\n=== per-part start/end rows ===")
+    for p in full["report"]["part_summaries"]:
+        print(f"  part {p['part']}: rows {p['from_index']:>2}..{p['to_index']:>2}"
+              f"  {p['start_row']} -> {p['end_row']}")
+    print("boundaries (shared rows, counted once):")
+    for b in full["report"]["boundaries"]:
+        print(f"  between parts {b['between_parts'][0]} & {b['between_parts'][1]}"
+              f"  at row {b['at_index']}: {b['row']}  "
+              f"({b['from_method']} -> {b['to_method']})")
+
+    # 33. read a part page: part 2 includes the boundary row shared with
+    #     part 1 (global index 12, tagged part 1) and runs to index 24
+    page = call("GET", f"/api/multipart-touches/{replay['id']}/rows?part=2")
+    print(f"\npart 2 page: {page['matched']} rows, global indexes "
+          f"{page['rows'][0]['index']}..{page['rows'][-1]['index']} "
+          f"(first row is the part-1/part-2 boundary)")
+    page = call("GET",
+                f"/api/multipart-touches/{replay['id']}/rows?part=3"
+                "&segment=1&from=25&to=27")
+    for r in page["rows"]:
+        print(f"  row {r['index']:>2}  part {r['part']}  seg {r['segment']}"
+              f"  {r['row']}")
+
+    # 34. parts vs permutation order mismatch: 4 is not a multiple of order 5
+    #     -> not closed; the result is never reported as a success
+    bad = call("POST", "/api/multipart-touches",
+               {"touch_id": one_lead["id"], "parts": 4})
+    show("parts/order mismatch (4 parts, order 5)", bad,
+         ["status", "success", "closed", "problems"])
+    print("  order:", bad["part_end_permutation"]["order"],
+          "divides parts:", bad["part_end_permutation"]["order_divides_parts"],
+          "|", bad["part_end_permutation"]["note"])
+    # 10 parts is a multiple of order 5: it ends at rounds but rang the cycle
+    # twice, so rounds came back early (untrue/premature), still not a success
+    twice = call("POST", "/api/multipart-touches",
+                 {"touch_id": one_lead["id"], "parts": 10})
+    show("10 parts (multiple of order 5): closes but repeats the cycle",
+         twice, ["status", "success", "closed", "problems"])
+
+    # 35. a bobbing part has part-end order 3: three parts close true
+    bob_touch = call("POST", "/api/touches", {"segments": [
+        {"method_id": m1["id"], "leads": 1,
+         "overrides": [{"lead": 1, "change": 12, "notation": "14"}]}]})
+    bob3 = call("POST", "/api/multipart-touches",
+                {"touch_id": bob_touch["id"], "parts": 3})
+    show("one bob lead replayed 3 times (classic 36-row touch)", bob3,
+         ["status", "success", "closed", "total_rows", "problems"])
+    print("  part-end permutation order:",
+          bob3["part_end_permutation"]["order"])
+
+    # 36. compare two replays and download the replay JSON
+    cmp = call("GET",
+               f"/api/multipart-touches/compare?a={replay['id']}&b={bad['id']}")
+    show("compare 5-part vs 4-part replay", cmp["comparison"],
+         ["parts_equal", "both_closed", "both_success",
+          "part_end_permutation_equal", "order_a", "order_b",
+          "parts_order_mismatch_b", "methods_overlap"])
+    req = urllib.request.Request(
+        BASE + f"/api/multipart-touches/{replay['id']}/download")
+    with urllib.request.urlopen(req) as resp:
+        payload = resp.read()
+        fname = resp.headers["Content-Disposition"].split("filename=")[-1].strip('"')
+    with open(fname, "wb") as fh:
+        fh.write(payload)
+    print(f"\ndownloaded multi-part replay -> {fname} ({len(payload)} bytes)")
+
+    # 37. invalid replays are refused and never stored: missing touch, bad
+    #     parts, and an expansion over the 1,000,000-row hard cap
+    for body in ({"touch_id": one_lead["id"]},
+                 {"touch_id": one_lead["id"], "parts": 0},
+                 {"touch_id": 999999, "parts": 5},
+                 {"touch_id": one_lead["id"], "parts": 83334}):
+        try:
+            call("POST", "/api/multipart-touches", body)
+        except urllib.error.HTTPError as e:
+            err = json.loads(e.read().decode())
+            show(f"refused {body}", err, ["code", "parts", "total_rows",
+                                          "hard_max_rows", "touch_id"])
+
 
 if __name__ == "__main__":
     main()

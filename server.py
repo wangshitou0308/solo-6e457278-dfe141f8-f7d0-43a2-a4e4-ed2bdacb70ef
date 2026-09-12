@@ -16,14 +16,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 from db import Store
-from ringing import (HARD_MAX_ROWS, LimitRequiredError, NotationError,
-                     SchemeError, SplicedError, TouchSearchError, analyze,
+from ringing import (HARD_MAX_ROWS, LimitRequiredError, MultipartError,
+                     NotationError, SchemeError, SplicedError,
+                     TouchSearchError, analyze, analyze_multipart,
                      analyze_spliced, compact_bells, compare_music,
-                     compare_reports, compare_touch_reports, parse_notation,
-                     parse_row, parse_scheme, row_str, rule_to_dict,
-                     score_analysis, score_touch, search_touches,
-                     SCORING_VERSION, SEARCH_DEFAULT_MAX_RESULTS,
-                     SEARCH_DEFAULT_MAX_STATES)
+                     compare_multipart_reports, compare_reports,
+                     compare_touch_reports, parse_notation, parse_row,
+                     parse_scheme, row_str, rule_to_dict, score_analysis,
+                     score_touch, search_touches, SCORING_VERSION,
+                     SEARCH_DEFAULT_MAX_RESULTS, SEARCH_DEFAULT_MAX_STATES)
 
 DOCS_HTML = """<!doctype html>
 <html lang="zh">
@@ -162,6 +163,43 @@ change 覆盖（<code>overrides</code>，lead 从 1 起按段内计）。所有�
 未应用覆盖（<code>unapplied_overrides</code>，如同一 change 被后续覆盖取代）。</li>
 </ul>
 
+<h2>多部组合复演（multi-part replay）</h2>
+<p>把一个已存 <strong>touch</strong>（或与 touch 同形的 <code>segments</code> 行内编排）当作<strong>单部</strong>，
+连续重放 <code>parts</code> 部：第 2 部从第 1 部末行接着展开，第 3 部从第 2 部末行……
+<strong>每部都不重置到 start_row</strong>；相邻两部共享的边界 row <strong>只计一次</strong>
+（全局共 <code>1 + parts × touch_rows</code> 个 row 条目）。</p>
+<ul>
+<li>创建：<code>POST /api/multipart-touches</code>，body 为
+<code>{"touch_id": 1, "parts": 5}</code>（也可用 <code>{"segments":[…], "parts":5}</code>
+直接按 touch 段形编排），可附 <code>start_row</code>（缺省沿用该 touch 的 start_row/rounds）与
+<code>max_rows</code>（1..1,000,000；缺省一个 extent，10 口起必须显式给值，<code>limit_required</code>）。</li>
+<li>每部重放该 touch 的<strong>方法区段与 change 覆盖</strong>：段内 overrides 在每一部都会再次生效，
+逐行条目标明 <code>part</code>/<code>segment</code>/方法版本/<code>lead</code>/<code>change</code>/<code>override</code> 来源；
+部内段间切换进 <code>switches</code>（每部一份，带全局行号），部与部的衔接进 <code>boundaries</code>
+（<code>between_parts</code>、<code>at_index</code>、边界 row、上下方法，<code>counted_once:true</code>）。</li>
+<li><strong>整段 truth</strong> 统一判定：跨部重复 row（<code>untrue</code>，两处位置含 part/segment）、
+提前回到 start_row（<code>premature_rounds</code>，末部最终闭合行除外）、末行是否闭合
+（<code>closed</code>）；逐部给起止 row/全局索引（<code>part_summaries</code>）。</li>
+<li><strong>part-end permutation（部末排列）</strong>：由<strong>首部</strong>的起止 row 导出——
+映射 <code>mapping</code>（紧凑符号键值）与阶 <code>order</code>（cycle 分解的 LCM），并核对
+<code>parts == order</code>（<code>parts_equal_order</code>）、<code>parts</code> 是否为阶的倍数
+（<code>order_divides_parts</code>）、与闭合是否一致（<code>consistent</code>）及文字说明 <code>note</code>。
+P<sup>k</sup> 把 rounds 送回 rounds 当且仅当 k 是阶的倍数；<code>parts</code> 与阶不一致时
+<code>problems</code> 加 <code>parts_order_mismatch</code> 并写明差异（是倍数但整周期重复多遍，
+或根本无法闭合）。<strong>未闭合的结果 <code>success</code> 一律为 false，绝不标成成功</strong>；
+只有闭合、无重复、无提前回 rounds 且 parts 与阶一致时 <code>status:"ok"</code>/<code>success:true</code>。</li>
+<li><strong>拒绝创建且不落库</strong>：base touch 不存在（404 <code>not_found</code>）、
+<code>parts</code> 非正整数（<code>bad_parts</code>）、段/覆盖非法（<code>bad_segment</code>）、
+展开超过 1,000,000 rows（<code>too_large</code>，附 parts/part_rows/total_rows/max_rows）。</li>
+<li>接口：列表 <code>GET /api/multipart-touches?touch_id=&amp;stage=</code>、完整报告
+<code>GET /api/multipart-touches/{id}</code>、按部（可再按段）分页读 rows
+<code>GET /api/multipart-touches/{id}/rows?part=2&amp;segment=1&amp;from=&amp;to=</code>
+（<code>part=0</code> 只有 index 0；第 P 部（P&gt;1）首页含与上一部共享的边界 row）、
+比较 <code>GET/POST /api/multipart-touches/compare?a=1&amp;b=2</code>（规模、闭合、truth、
+部末排列与其阶、parts/阶不一致标记、方法交集）与
+下载 <code>GET /api/multipart-touches/{id}/download</code>（JSON attachment）。</li>
+</ul>
+
 <h2>Touch 搜索（touch search）</h2>
 <p>在 <strong>lead 边界</strong>对一组同 stage 的方法版本与命名 call 做分支搜索，寻找真实闭合 touch。每个方法除了隐式的
 <code>plain</code>（不改记号）外，可定义若干<strong>命名 call</strong>：每个 call 指定 lead 内替换的
@@ -206,6 +244,12 @@ start_row 且全程无重复的分支才是候选。</li>
 <tr><td class="tag get">GET</td><td><code>/api/touches/{id}/rows?segment=2&amp;from=0&amp;to=60</code></td><td>逐行结果，可按区段过滤、按行号切片</td></tr>
 <tr><td class="tag get">GET</td><td><code>/api/touches/{id}/download</code></td><td>下载 touch 报告 JSON（attachment）</td></tr>
 <tr><td class="tag get">GET</td><td><code>/api/touches/compare?a=1&amp;b=2</code></td><td>比较两次 touch 的规模、闭合、truth 与首次重复位置；也支持 POST <code>{"a":1,"b":2}</code></td></tr>
+<tr><td class="tag post">POST</td><td><code>/api/multipart-touches</code></td><td>多部组合复演。Body: <code>{"touch_id":1,"parts":5,"start_row"?,"max_rows"?:1000000}</code>（或 <code>{"segments":[…],"parts":5}</code>）</td></tr>
+<tr><td class="tag get">GET</td><td><code>/api/multipart-touches?touch_id=&amp;stage=</code></td><td>列出多部复演（摘要：每部起止、部末排列及阶、truth、问题）</td></tr>
+<tr><td class="tag get">GET</td><td><code>/api/multipart-touches/{id}</code></td><td>完整复演报告（含逐行 rows、part_summaries、boundaries、switches）</td></tr>
+<tr><td class="tag get">GET</td><td><code>/api/multipart-touches/{id}/rows?part=2&amp;segment=1&amp;from=&amp;to=</code></td><td>按部（可再按段）分页读 rows；边界 row 只存一次</td></tr>
+<tr><td class="tag get">GET</td><td><code>/api/multipart-touches/{id}/download</code></td><td>下载复演报告 JSON（attachment）</td></tr>
+<tr><td class="tag get">GET</td><td><code>/api/multipart-touches/compare?a=1&amp;b=2</code></td><td>比较两次多部复演；也支持 POST <code>{"a":1,"b":2}</code></td></tr>
 <tr><td class="tag post">POST</td><td><code>/api/touch-searches</code></td><td>touch 搜索。Body: <code>{"methods":[{"method_id":1,"calls":[{"name":"bob","change":12,"notation":"14"}]}],"max_leads":5,"min_leads"?:1,"max_states"?:100000,"max_results"?:100,"scheme_id"?,"start_row"?, "name"?}</code></td></tr>
 <tr><td class="tag get">GET</td><td><code>/api/touch-searches?stage=&amp;scheme_id=</code></td><td>列出搜索作业（摘要 + 候选概要 + 剪枝/统计）</td></tr>
 <tr><td class="tag get">GET</td><td><code>/api/touch-searches/{id}</code></td><td>完整搜索报告（候选页支持 <code>?offset=&amp;limit=</code>，缺省 20）</td></tr>
@@ -262,6 +306,41 @@ curl -sOJ localhost:8000/api/touches/1/download</pre>
  "code": "bad_segment", "segment": 2, "stage": 5, "expected": 6}
 {"error": "total rows 84 exceed the limit of 60", "code": "bad_segment",
  "segment": 3, "total_rows": 84, "max_rows": 60}</pre>
+
+<h2>示例：多部组合复演</h2>
+<pre># 先把一个已存 touch 当作单部（这里是 Plain Bob Minor 的一个 lead）
+curl -s -X POST localhost:8000/api/touches -d '{
+  "segments": [{"method_id": 1, "leads": 1}]}'
+# 连续复演 5 部：每部接上一部末行，边界 row 只计一次 -&gt; 正好 plain course 闭合
+curl -s -X POST localhost:8000/api/multipart-touches -d '{"touch_id": 1, "parts": 5}'
+# -&gt; {"status":"ok","success":true,"closed":true,"parts":5,"touch_rows":12,
+#     "total_rows":60,"distinct_rows":61,"boundary_rows_counted_once":4,
+#     "part_end_permutation":{"row":"135264","order":5,"parts_equal_order":true,
+#       "order_divides_parts":true,"consistent":true,"note":"parts equals ..."},
+#     "truth":{"true":true,...},"problems":[]}
+
+# parts 与排列阶不一致（4 不是 5 的倍数）：未闭合，success 绝不为 true
+curl -s -X POST localhost:8000/api/multipart-touches -d '{"touch_id": 1, "parts": 4}'
+# -&gt; {"status":"not_closed","success":false,"closed":false,
+#     "part_end_permutation":{"order":5,"parts_equal_order":false,
+#       "order_divides_parts":false,"consistent":true,...},
+#     "problems":["not_closed","parts_order_mismatch"]}
+
+# 按部读取逐行结果（第 2 部；首页是与第 1 部共享的边界 row，行号 12）
+curl -s 'localhost:8000/api/multipart-touches/1/rows?part=2'
+# 只看第 3 部的第 1 段、全局行号 25..30
+curl -s 'localhost:8000/api/multipart-touches/1/rows?part=3&segment=1&from=25&to=30'
+
+# 比较两次复演 / 下载 JSON
+curl -s 'localhost:8000/api/multipart-touches/compare?a=1&b=2'
+curl -sOJ localhost:8000/api/multipart-touches/1/download</pre>
+<p>非法参数拒绝创建且不落库：</p>
+<pre>{"code":"not_found","touch_id":99,"error":"touch 99 not found"}
+{"code":"bad_parts","parts":0,"error":"parts must be a positive integer"}
+{"code":"too_large","parts":83334,"part_rows":12,"total_rows":1000008,
+ "max_rows":1000000,"hard_max_rows":1000000,
+ "error":"total rows 1,000,008 (83,334 parts x 12) exceed the limit of 1,000,000"}</pre>
+
 <h2>示例：10 口（Royal）与 12 口（Maximus）</h2>
 <p>新建数据库后方法 id 取决于自增序列，下面的命令<strong>直接接续使用创建响应里的
 <code>id</code></strong>（用标准库 <code>python3</code> 解析 JSON），可整段复制执行：</p>
@@ -379,7 +458,7 @@ curl -sOJ localhost:8000/api/touch-searches/1/download</pre>
 
 API_INDEX = {
     "name": "Change Ringing Method Validator API",
-    "version": "1.3",
+    "version": "1.4",
     "min_stage": 4,
     "max_stage": 12,
     "hard_max_rows": HARD_MAX_ROWS,
@@ -404,6 +483,12 @@ API_INDEX = {
         "GET  /api/touches/{id}/rows?segment=&from=&to=",
         "GET  /api/touches/{id}/download",
         "GET  /api/touches/compare?a=&b=  (or POST)",
+        "POST /api/multipart-touches",
+        "GET  /api/multipart-touches?touch_id=&stage=",
+        "GET  /api/multipart-touches/{id}",
+        "GET  /api/multipart-touches/{id}/rows?part=&segment=&from=&to=",
+        "GET  /api/multipart-touches/{id}/download",
+        "GET  /api/multipart-touches/compare?a=&b=  (or POST)",
         "POST /api/touch-searches",
         "GET  /api/touch-searches?stage=&scheme_id=",
         "GET  /api/touch-searches/{id}",
@@ -907,6 +992,256 @@ def api_compare_touches(handler, query, body):
             "comparison": comparison}, 200
 
 
+# --------------------------------------------------------- multi-part replays
+def _get_replay_or_404(store, replay_id):
+    rec = store.get_multipart_touch(replay_id)
+    if rec is None:
+        raise ApiError(404, f"multi-part replay {replay_id} not found",
+                       "not_found")
+    return rec
+
+
+def _resolve_touch_segments(store, segments):
+    """Resolve a stored-touch style segment list to engine specs."""
+    resolved = []
+    for i, spec in enumerate(segments, start=1):
+        if not isinstance(spec, dict):
+            raise ApiError(400, f"segment {i} must be an object", "bad_segment",
+                           {"segment": i})
+        method_id = spec.get("method_id")
+        if isinstance(method_id, bool) or not isinstance(method_id, int):
+            raise ApiError(400, f"segment {i}: method_id must be an integer",
+                           "bad_segment", {"segment": i})
+        method = store.get_method(method_id)
+        if method is None:
+            raise ApiError(404, f"segment {i}: method {method_id} not found",
+                           "not_found", {"segment": i, "method_id": method_id})
+        overrides = spec.get("overrides") or []
+        if not isinstance(overrides, list):
+            raise ApiError(400, f"segment {i}: overrides must be a list",
+                           "bad_segment", {"segment": i})
+        leads = spec.get("leads")
+        if isinstance(leads, bool) or not isinstance(leads, int) or leads < 1:
+            raise ApiError(400, f"segment {i}: leads must be a positive integer",
+                           "bad_segment", {"segment": i, "leads": leads})
+        resolved.append({"method_id": method["id"], "name": method["name"],
+                         "version": method["version"], "stage": method["stage"],
+                         "notation": method["notation"],
+                         "leads": leads, "overrides": overrides})
+    return resolved
+
+
+def api_create_multipart(handler, query, body):
+    """Create a multi-part replay from a stored touch or inline segments.
+
+    Body: {"touch_id"?, "segments"?, "parts", "start_row"?, "max_rows"?}.
+    The base touch's segments are replayed `parts` times, each part continuing
+    from the previous part's last row (a part is never reset to start_row);
+    the shared boundary row counts once.  Nothing is stored when the base
+    touch is missing, the parameters are invalid or the replay would exceed
+    1,000,000 rows.
+    """
+    store = handler.server.store
+    if not isinstance(body, dict):
+        raise ApiError(400, "request body must be a JSON object", "bad_field")
+    parts = body.get("parts")
+    if isinstance(parts, bool) or not isinstance(parts, int) or parts < 1:
+        raise ApiError(400, "parts must be a positive integer", "bad_parts",
+                       {"parts": parts})
+    max_rows = body.get("max_rows")
+    if max_rows is not None:
+        if isinstance(max_rows, bool) or not isinstance(max_rows, int) \
+                or not 1 <= max_rows <= HARD_MAX_ROWS:
+            raise ApiError(400,
+                           f"max_rows must be an integer in 1..{HARD_MAX_ROWS}",
+                           "bad_field")
+    touch_id = body.get("touch_id")
+    if touch_id is not None:
+        touch_id = _validate_id(touch_id, "touch_id")
+        touch = store.get_touch(touch_id)
+        if touch is None:
+            raise ApiError(404, f"touch {touch_id} not found", "not_found",
+                           {"touch_id": touch_id})
+        segments = touch["segments"]
+        start_row = body.get("start_row", touch["report"]["start_row"])
+        base_ref = {"touch_id": touch_id}
+    else:
+        segments = _require(body, "segments")
+        if not isinstance(segments, list) or not segments:
+            raise ApiError(400, "segments must be a non-empty list",
+                           "bad_segment")
+        start_row = body.get("start_row")
+        base_ref = {}
+    resolved = _resolve_touch_segments(store, segments)
+    try:
+        report = analyze_multipart(resolved, parts, start_row=start_row,
+                                   max_rows=max_rows)
+    except MultipartError as err:
+        extra = {k: v for k, v in err.to_dict().items() if k != "error"}
+        raise ApiError(400, err.message, err.code, extra)
+    except SplicedError as err:
+        extra = {k: v for k, v in err.to_dict().items() if k != "error"}
+        raise ApiError(400, err.message, "bad_segment", extra)
+    rec = store.create_multipart_touch(
+        touch_id, report["stage"], segments, parts, report["max_rows"],
+        report["status"], report)
+    out = _replay_summary(rec)
+    out.update(base_ref)
+    out["links"] = {
+        "report": f"/api/multipart-touches/{rec['id']}",
+        "rows": f"/api/multipart-touches/{rec['id']}/rows",
+        "compare": f"/api/multipart-touches/compare?a={rec['id']}&b=…",
+        "download": f"/api/multipart-touches/{rec['id']}/download",
+    }
+    return out, 201
+
+
+def _replay_summary(rec):
+    rep = rec["report"]
+    keys = ("status", "success", "closed", "stage", "parts", "part_count",
+            "touch_rows", "total_rows", "total_leads", "segment_count",
+            "distinct_rows", "boundary_rows_counted_once", "problems")
+    out = {k: rep[k] for k in keys}
+    out.update({"id": rec["id"], "touch_id": rec["touch_id"],
+                "created_at": rec["created_at"], "truth": rep["truth"],
+                "part_end_permutation": {
+                    k: rep["part_end_permutation"][k] for k in
+                    ("row", "canonical_row", "order", "parts",
+                     "parts_equal_order", "order_divides_parts",
+                     "consistent", "note")},
+                "methods_used": [{k: m[k] for k in
+                                  ("method_id", "name", "version", "leads",
+                                   "rows", "parts")}
+                                 for m in rep["methods_used"]]})
+    return out
+
+
+def api_list_multipart(handler, query, body):
+    store = handler.server.store
+
+    def _opt_int(name):
+        if name not in query:
+            return None
+        try:
+            return int(query[name][0])
+        except ValueError:
+            raise ApiError(400, f"{name} must be an integer", "bad_field")
+
+    recs = store.list_multipart_touches(touch_id=_opt_int("touch_id"),
+                                        stage=_opt_int("stage"))
+    return {"multipart_touches": [_replay_summary(r) for r in recs]}, 200
+
+
+def api_get_multipart(handler, query, body, replay_id):
+    rec = _get_replay_or_404(handler.server.store, replay_id)
+    return {"id": rec["id"], "created_at": rec["created_at"],
+            "touch_id": rec["touch_id"], "stage": rec["stage"],
+            "segments": rec["segments"], "parts": rec["parts"],
+            "max_rows": rec["max_rows"], "status": rec["status"],
+            "report": rec["report"]}, 200
+
+
+def api_multipart_rows(handler, query, body, replay_id):
+    """Page the replay rows by part (and optionally segment) and global index.
+
+    ?part=P[&segment=S][&from=&to=]: part 0 is only the index-0 row; part P>1
+    starts at the boundary row shared with part P-1 (it is stored once).
+    """
+    rec = _get_replay_or_404(handler.server.store, replay_id)
+    report = rec["report"]
+    all_rows = report["rows"]
+    wanted_parts = None
+    if "part" in query:
+        try:
+            part = int(query["part"][0])
+        except ValueError:
+            raise ApiError(400, "part must be an integer", "bad_field")
+        if not 0 <= part <= report["parts"]:
+            raise ApiError(404,
+                           f"replay {replay_id} has no part {part}",
+                           "not_found", {"part": part,
+                                         "parts": report["parts"]})
+        if part >= 1:
+            # include the boundary row shared with the previous part (it is
+            # still stored/counted once globally): part P>1 starts one row
+            # before its first generated row
+            boundary = (part - 1) * report["touch_rows"]
+            rows = [r for r in all_rows
+                    if r["part"] == part or r["index"] == boundary]
+        else:
+            rows = [r for r in all_rows if r["part"] == 0]
+    else:
+        part = None
+        rows = all_rows
+    if "segment" in query:
+        try:
+            segment = int(query["segment"][0])
+        except ValueError:
+            raise ApiError(400, "segment must be an integer", "bad_field")
+        if not 0 <= segment <= report["segment_count"]:
+            raise ApiError(404,
+                           f"replay {replay_id} has no segment {segment}",
+                           "not_found", {"segment": segment,
+                                         "segment_count": report["segment_count"]})
+        rows = [r for r in rows if r["segment"] == segment]
+    else:
+        segment = None
+
+    def _int_param(name, default):
+        if name not in query:
+            return default
+        try:
+            return int(query[name][0])
+        except ValueError:
+            raise ApiError(400, f"{name} must be an integer", "bad_field")
+
+    start = max(0, _int_param("from", 0))
+    end = _int_param("to", rows[-1]["index"] if rows else 0)  # inclusive
+    sliced = [r for r in rows if start <= r["index"] <= end]
+    return {"id": rec["id"], "part": part, "segment": segment,
+            "total": len(report["rows"]), "matched": len(rows),
+            "from": start, "to": min(end, rows[-1]["index"] if rows else 0),
+            "rows": sliced}, 200
+
+
+def api_multipart_download(handler, query, body, replay_id):
+    rec = _get_replay_or_404(handler.server.store, replay_id)
+    payload = {"id": rec["id"], "created_at": rec["created_at"],
+               "touch_id": rec["touch_id"], "stage": rec["stage"],
+               "segments": rec["segments"], "parts": rec["parts"],
+               "max_rows": rec["max_rows"], "report": rec["report"]}
+    return payload, 200, f"multipart-touch-{rec['id']}.json"
+
+
+def api_compare_multipart(handler, query, body):
+    store = handler.server.store
+
+    def _param(name):
+        for src in (body, query):
+            if isinstance(src, dict) and name in src:
+                value = src[name]
+                return value[0] if isinstance(value, list) else value
+        return None
+
+    a, b = _param("a"), _param("b")
+    if a is None or b is None:
+        raise ApiError(400, "provide multi-part replay ids a & b",
+                       "missing_field")
+    try:
+        rec_a = _get_replay_or_404(store, int(a))
+        rec_b = _get_replay_or_404(store, int(b))
+    except ValueError:
+        raise ApiError(400, "ids must be integers", "bad_field")
+
+    def _side(rec):
+        return {"multipart_id": rec["id"], "touch_id": rec["touch_id"],
+                "created_at": rec["created_at"]}
+
+    comparison = compare_multipart_reports(rec_a["report"], rec_b["report"])
+    return {"a": _side(rec_a), "b": _side(rec_b),
+            "comparison": comparison}, 200
+
+
 # ----------------------------------------------------------- touch searches
 def _get_search_or_404(store, search_id):
     rec = store.get_touch_search(search_id)
@@ -1398,6 +1733,18 @@ ROUTES = [
     ("GET", re.compile(r"^/api/touches$"), api_list_touches),
     ("GET", re.compile(r"^/api/touches/compare$"), api_compare_touches),
     ("POST", re.compile(r"^/api/touches/compare$"), api_compare_touches),
+    ("POST", re.compile(r"^/api/multipart-touches$"), api_create_multipart),
+    ("GET", re.compile(r"^/api/multipart-touches$"), api_list_multipart),
+    ("GET", re.compile(r"^/api/multipart-touches/compare$"),
+     api_compare_multipart),
+    ("POST", re.compile(r"^/api/multipart-touches/compare$"),
+     api_compare_multipart),
+    ("GET", re.compile(r"^/api/multipart-touches/(\d+)$"),
+     lambda h, q, b, rid: api_get_multipart(h, q, b, int(rid))),
+    ("GET", re.compile(r"^/api/multipart-touches/(\d+)/rows$"),
+     lambda h, q, b, rid: api_multipart_rows(h, q, b, int(rid))),
+    ("GET", re.compile(r"^/api/multipart-touches/(\d+)/download$"),
+     lambda h, q, b, rid: api_multipart_download(h, q, b, int(rid))),
     ("POST", re.compile(r"^/api/touch-searches$"), api_create_touch_search),
     ("GET", re.compile(r"^/api/touch-searches$"), api_list_touch_searches),
     ("GET", re.compile(r"^/api/touch-searches/(\d+)$"),
@@ -1432,7 +1779,7 @@ ROUTES = [
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "RingingAPI/1.3"
+    server_version = "RingingAPI/1.4"
     protocol_version = "HTTP/1.1"
 
     def do_GET(self):
@@ -1467,6 +1814,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"code": "notation_error", **err.to_dict()}, 400)
         except LimitRequiredError as err:
             self._send_json({"code": "limit_required", **err.to_dict()}, 400)
+        except MultipartError as err:
+            self._send_json({"code": err.code, **err.to_dict()}, 400)
         except SchemeError as err:
             self._send_json({"code": "bad_rule", **err.to_dict()}, 400)
         except ValueError as err:

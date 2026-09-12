@@ -143,6 +143,33 @@ class SplicedError(ValueError):
         return out
 
 
+class MultipartError(ValueError):
+    """A multi-part replay error; nothing is expanded or stored.
+
+    Attributes:
+        message: human readable description
+        code:    machine readable code - "bad_replay" (generic),
+                 "bad_parts" (part count missing/illegal) or "too_large"
+                 (the full replay would exceed the row cap)
+        part:    1-based part the error is located to (when applicable)
+        extra:   additional structured details
+    """
+
+    def __init__(self, message, code="bad_replay", part=None, extra=None):
+        super().__init__(message)
+        self.message = message
+        self.code = code
+        self.part = part
+        self.extra = extra or {}
+
+    def to_dict(self):
+        out = {"error": self.message}
+        if self.part is not None:
+            out["part"] = self.part
+        out.update(self.extra)
+        return out
+
+
 class SchemeError(ValueError):
     """A musicality-scheme rule error, located to the rule index (0-based).
 
@@ -668,27 +695,20 @@ def _notation_details(err):
     return out
 
 
-def analyze_spliced(segments, start_row=None, max_rows=None):
-    """Expand a spliced touch across method segments and check its truth.
+def _prepare_segments(segments, max_rows=None):
+    """Validate spliced/replay segments and parse their changes.
 
-    segments: list of {"method_id", "name", "version", "stage", "notation",
-        "leads", "overrides"?}.  Every segment must use the same number of
-        bells; "leads" gives the number of whole leads to ring, so method
-        switches only ever happen at lead boundaries.  "overrides" replace
-        single changes inside the segment: {"lead": L, "change": K,
-        "notation": "14"} with L counted from 1 within the segment.
+    Shared by analyze_spliced() (one round of the segments) and
+    analyze_multipart() (several parts replaying the same segments).  Each
+    spec is {"method_id", "name", "version", "stage", "notation", "leads",
+    "overrides"?}; every segment must use the same number of bells and its
+    leads/overrides must be in range.  The cumulative row count must stay at
+    or below the resolved cap.
 
-    The touch starts at start_row (default rounds); each following segment
-    continues from the previous segment's last row - the methods' own
-    start_rows are NOT re-applied.  Repeated rows, a premature return to
-    the start row, closure at the end and the row limit are judged across
-    the whole touch, never from the individual methods' own truth.
-
-    Raises SplicedError (located to a segment) on inconsistent stages, bad
-    leads, out-of-range overrides or a cumulative row count above max_rows;
-    nothing is expanded in that case.  With no max_rows given the cap is one
-    extent; on stages 10-12 that is above the hard limit and LimitRequiredError
-    is raised before any segment is expanded.
+    Returns (stage, effective_max, infos, total_rows, total_leads) where each
+    info carries the parsed changes and prepared override maps.  Raises
+    SplicedError located to a segment; with no cap on stages 10-12 it raises
+    LimitRequiredError before anything is expanded.
     """
     if not isinstance(segments, (list, tuple)) or not segments:
         raise SplicedError("segments must be a non-empty list")
@@ -783,7 +803,33 @@ def analyze_spliced(segments, start_row=None, max_rows=None):
                       "override_map": override_map,
                       "override_owner": override_owner,
                       "override_reports": override_reports})
+    return stage, effective_max, infos, total_rows, total_leads
 
+
+def analyze_spliced(segments, start_row=None, max_rows=None):
+    """Expand a spliced touch across method segments and check its truth.
+
+    segments: list of {"method_id", "name", "version", "stage", "notation",
+        "leads", "overrides"?}.  Every segment must use the same number of
+        bells; "leads" gives the number of whole leads to ring, so method
+        switches only ever happen at lead boundaries.  "overrides" replace
+        single changes inside the segment: {"lead": L, "change": K,
+        "notation": "14"} with L counted from 1 within the segment.
+
+    The touch starts at start_row (default rounds); each following segment
+    continues from the previous segment's last row - the methods' own
+    start_rows are NOT re-applied.  Repeated rows, a premature return to
+    the start row, closure at the end and the row limit are judged across
+    the whole touch, never from the individual methods' own truth.
+
+    Raises SplicedError (located to a segment) on inconsistent stages, bad
+    leads, out-of-range overrides or a cumulative row count above max_rows;
+    nothing is expanded in that case.  With no max_rows given the cap is one
+    extent; on stages 10-12 that is above the hard limit and LimitRequiredError
+    is raised before any segment is expanded.
+    """
+    stage, effective_max, infos, total_rows, total_leads = \
+        _prepare_segments(segments, max_rows)
     start = parse_row(start_row, stage)
     extent = math.factorial(stage)
 
@@ -985,6 +1031,435 @@ def compare_touch_reports(report_a, report_b):
         # null when either side's truth is inconclusive (checked under a cap)
         "both_true": (ta is True and tb is True) if (ta is not None and tb is not None) else None,
         "first_repeat_same_position": same_repeat,
+        "methods_overlap": sorted(ids_a & ids_b),
+    }
+
+
+# ============================================================ multi-part replay
+# A "touch" in the store is one round of a list of method segments (see
+# analyze_spliced).  A multi-part replay rings the SAME touch "parts" times:
+# part 2 continues from part 1's last row, part 3 from part 2's, and so on -
+# a part is never reset to the start row, so the row shared by two adjacent
+# parts is stored/counted exactly once (the global row list is
+# 1 + parts * touch_rows entries).
+#
+# Truth (repeats, a premature return to the start row, closure at the very
+# end) is judged across the whole replay, never per part.  Ringing the touch
+# once from rounds applies a fixed permutation P to the bells (the "part-end
+# permutation"); after k parts the permutation is P**k, so the replay closes
+# exactly when parts is a multiple of P's order.  The order is exported from
+# part 1's start/end rows and any parts/order disagreement is reported.
+def _permutation_order(mapping):
+    """Order of a permutation given as a 1-based mapping dict (p -> image)."""
+    order = 1
+    seen = set()
+    for p in mapping:
+        if p in seen:
+            continue
+        cycle_len = 0
+        q = p
+        while q not in seen:
+            seen.add(q)
+            q = mapping[q]
+            cycle_len += 1
+        order = order * cycle_len // math.gcd(order, cycle_len)
+    return order
+
+
+def _part_end_permutation(start, end):
+    """The fixed permutation one part applies, exported from any part's
+    start/end rows (both bell tuples of the same stage).
+
+    A fixed sequence of changes applies one fixed permutation of POSITIONS:
+    the bell at start position p ends at end position q(p).  Labeling
+    positions by the bells of rounds (position p "is" bell p), the part
+    permutation is p -> q(p); its cycle structure/order is the same for every
+    start row.  Applied to rounds, position j of the end row holds the bell
+    Q^{-1}(j), i.e. canonical_end is the inverse row of Q (same cycle
+    structure/order) - it is exactly the end row rung from rounds.
+
+    Returns (position_map, canonical_end_row): position_map maps the 1-based
+    start position p to its destination position q(p); canonical_end_row is
+    the part-end row rung from rounds (tuple of bells by position).
+    """
+    stage = len(start)
+    end_position = {bell: pos for pos, bell in enumerate(end)}
+    position_map = {}
+    for pos, bell in enumerate(start):
+        position_map[pos + 1] = end_position[bell] + 1
+    canonical_end = [None] * stage
+    for p, q in position_map.items():
+        canonical_end[q - 1] = p
+    return position_map, tuple(canonical_end)
+
+
+def _multipart_layout(infos):
+    """Global (from_index, to_index] layout of one part from its segments."""
+    layout = []
+    cum = 0
+    for info in infos:
+        n = info["leads"] * info["lead_len"]
+        layout.append({"from_index": cum, "to_index": cum + n,
+                       "lead_length": info["lead_len"]})
+        cum += n
+    return layout
+
+
+def _locate_multipart(index, part, part_offset, layout):
+    """Map a global replay index to part/segment/lead/change (1-based)."""
+    if index <= 0:
+        return {"index": 0, "part": 0, "segment": 0, "lead": 0, "change": 0}
+    for seg_i, lay in enumerate(layout, start=1):
+        if part_offset <= lay["to_index"]:
+            off = part_offset - lay["from_index"]
+            return {"index": index, "part": part, "segment": seg_i,
+                    "lead": (off - 1) // lay["lead_length"] + 1,
+                    "change": (off - 1) % lay["lead_length"] + 1}
+    return {"index": index, "part": part, "segment": None,
+            "lead": None, "change": None}
+
+
+def analyze_multipart(segments, parts, start_row=None, max_rows=None):
+    """Replay one validated segment list `parts` times and check the result.
+
+    segments: the same segment specs analyze_spliced() takes (resolved method
+        versions with stage/notation/leads/overrides); the list describes ONE
+        part ("the touch").  The whole planned replay must fit in the row
+        cap: its length is 1 + parts * touch_rows and every adjacent pair of
+        parts shares its boundary row, counted once.
+    parts: number of parts, a positive integer.  Each part continues from the
+        previous part's last row; no part is reset to start_row.
+
+    Truth is judged across the entire replay: a non-closing repeated row is
+    "untrue", a return to start_row before the final global row is
+    "premature_rounds", and the final row is expected back at start_row
+    ("closed").  The part-end permutation is exported from part 1's start/end
+    rows together with its order; the replay only closes for a multiple of
+    that order, and a parts/order disagreement is reported explicitly even
+    when the status is otherwise fine.  A result that is not closed is never
+    reported as a success.
+
+    Raises MultipartError on a bad part count or an over-size replay
+    (nothing expanded), LimitRequiredError without a cap on stages 10-12 and
+    SplicedError located to a segment on bad segment specs.
+    """
+    if isinstance(parts, bool) or not isinstance(parts, int) or parts < 1:
+        raise MultipartError(
+            "parts must be a positive integer", code="bad_parts",
+            extra={"parts": parts})
+    stage, effective_max, infos, part_rows, total_leads_one = \
+        _prepare_segments(segments, max_rows)
+    # the planned replay: one shared starting row plus `parts` rounds of the
+    # touch, with each inter-part boundary row counted exactly once
+    total_rows = parts * part_rows
+    if total_rows > effective_max:
+        raise MultipartError(
+            f"total rows {total_rows} ({parts} parts x {part_rows}) exceed "
+            f"the limit of {effective_max}", code="too_large",
+            extra={"parts": parts, "part_rows": part_rows,
+                   "total_rows": total_rows, "max_rows": effective_max,
+                   "hard_max_rows": HARD_MAX_ROWS})
+    start = parse_row(start_row, stage)
+    extent = math.factorial(stage)
+    layout = _multipart_layout(infos)
+
+    rows = [start]
+    entries = [{"index": 0, "part": 0, "segment": 0, "method_id": None,
+                "method": None, "version": None, "lead": 0, "change": 0,
+                "row": row_str(start), "token": None, "override": None,
+                "repeat": False}]
+    seen = {start: 0}
+    first_repeat = None
+    premature = None
+    step = 0
+    part_summaries = []
+    boundaries = []
+    # methods aggregated over every part: {(method_id, name, version): usage}
+    used = {}
+
+    for part in range(1, parts + 1):
+        part_start_index = step
+        part_start_row = rows[-1]
+        part_overrides = []
+        for i, info in enumerate(infos, start=1):
+            changes = info["changes"]
+            lead_len = info["lead_len"]
+            for lead in range(1, info["leads"] + 1):
+                for pos in range(1, lead_len + 1):
+                    key = (lead, pos)
+                    is_override = key in info["override_map"]
+                    change = (info["override_map"][key] if is_override
+                              else changes[pos - 1])
+                    nxt = change.apply(rows[-1])
+                    step += 1
+                    rows.append(nxt)
+                    closing = nxt == start and step == total_rows
+                    is_repeat = nxt in seen and not closing
+                    part_offset = step - part_start_index
+                    if is_repeat and first_repeat is None:
+                        first_index = seen[nxt]
+                        first_part = ((first_index - 1) // part_rows + 1
+                                      if first_index > 0 else 0)
+                        first_offset = (first_index
+                                        - (first_part - 1) * part_rows)
+                        first_repeat = {
+                            "row": row_str(nxt),
+                            "first": _locate_multipart(
+                                first_index, first_part, first_offset, layout),
+                            "second": _locate_multipart(
+                                step, part, part_offset, layout)}
+                    if nxt == start and not closing and premature is None:
+                        premature = _locate_multipart(
+                            step, part, part_offset, layout)
+                    override_src = None
+                    if is_override:
+                        rep = info["override_owner"][key]
+                        if not rep["applied"]:
+                            rep["applied"] = True
+                            rep["row_index"] = step
+                            rep["part"] = part
+                            rep["before_row"] = row_str(rows[step - 1])
+                            rep["after_row"] = row_str(nxt)
+                        part_overrides.append({
+                            "segment": i, "lead": lead, "change": pos,
+                            "notation": rep["notation"],
+                            "replaces_token": rep["replaces_token"]})
+                        override_src = {"part": part, "segment": i,
+                                        "lead": lead, "change": pos,
+                                        "notation": rep["notation"],
+                                        "replaces_token": rep["replaces_token"]}
+                    entries.append({"index": step, "part": part, "segment": i,
+                                    "method_id": info["method_id"],
+                                    "method": info["name"],
+                                    "version": info["version"],
+                                    "lead": lead, "change": pos,
+                                    "row": row_str(nxt), "token": change.token,
+                                    "override": override_src,
+                                    "repeat": is_repeat})
+                    if not is_repeat:
+                        seen[nxt] = step
+            mid = info["method_id"]
+            entry = used.setdefault(
+                mid, {"method_id": mid, "name": info["name"],
+                      "version": info["version"], "leads": 0, "rows": 0,
+                      "parts": [], "segments_in_part": []})
+            entry["leads"] += info["leads"]
+            entry["rows"] += info["leads"] * info["lead_len"]
+            if part not in entry["parts"]:
+                entry["parts"].append(part)
+            if i not in entry["segments_in_part"]:
+                entry["segments_in_part"].append(i)
+        part_end_row = rows[-1]
+        seg_summaries = []
+        for i, info in enumerate(infos, start=1):
+            lay = layout[i - 1]
+            g_from = part_start_index + lay["from_index"]
+            g_to = part_start_index + lay["to_index"]
+            seg_summaries.append({
+                "index": i, "method_id": info["method_id"],
+                "name": info["name"], "version": info["version"],
+                "leads": info["leads"], "lead_length": info["lead_len"],
+                "rows": lay["to_index"] - lay["from_index"],
+                "from_index": g_from, "to_index": g_to,
+                "start_row": row_str(rows[g_from]),
+                "end_row": row_str(rows[g_to]),
+                "overrides": [o for o in part_overrides
+                              if o["segment"] == i]})
+        part_summaries.append({
+            "part": part,
+            "from_index": part_start_index, "to_index": step,
+            "start_row": row_str(part_start_row),
+            "end_row": row_str(part_end_row),
+            "rows": step - part_start_index,
+            "segments": seg_summaries})
+        if part > 1:
+            boundaries.append({
+                "between_parts": [part - 1, part], "at_index": part_start_index,
+                "row": row_str(part_start_row),
+                "from_method_id": infos[-1]["method_id"],
+                "from_method": infos[-1]["name"],
+                "from_version": infos[-1]["version"],
+                "to_method_id": infos[0]["method_id"],
+                "to_method": infos[0]["name"],
+                "to_version": infos[0]["version"],
+                "counted_once": True})
+
+    closed = rows[-1] == start
+    # part-end permutation exported from part 1: the fixed position
+    # permutation one part applies; its canonical row is the end row ringing
+    # the part FROM ROUNDS would give, and the cycle structure (order) is the
+    # same for any start row.  P**k sends rounds back to rounds iff k is a
+    # multiple of order(P).
+    p1_start, p1_end = start, rows[part_rows]
+    position_map, canonical_end = _part_end_permutation(p1_start, p1_end)
+    # the position permutation and its inverse row share cycle structure,
+    # so this order is also the order of the rounds-based part-end row
+    order = _permutation_order(position_map)
+    parts_match_order = parts == order
+    order_divides_parts = parts % order == 0
+    if parts_match_order:
+        order_note = "parts equals the part-end permutation order"
+    elif order_divides_parts:
+        order_note = (f"parts ({parts}) is a multiple of the permutation "
+                      f"order ({order}); the replay closes but rings the "
+                      f"cycle {parts // order} time(s)")
+    else:
+        order_note = (f"parts ({parts}) is not a multiple of the part-end "
+                      f"permutation order ({order}); the replay cannot close")
+
+    if not closed:
+        status = "not_closed"
+    elif premature is not None:
+        status = "premature_rounds"
+    elif first_repeat is not None:
+        status = "untrue"
+    else:
+        status = "ok"
+    problems = []
+    if first_repeat is not None:
+        problems.append("untrue")
+    if premature is not None:
+        problems.append("premature_rounds")
+    if not closed:
+        problems.append("not_closed")
+    if not parts_match_order:
+        problems.append("parts_order_mismatch")
+
+    all_overrides = [rep for info in infos for rep in info["override_reports"]]
+    unapplied = []
+    for rep in all_overrides:
+        if rep["applied"]:
+            continue
+        brief = {k: rep[k] for k in
+                 ("segment", "lead", "change", "notation", "replaces_token")}
+        if rep.get("superseded"):
+            brief["reason"] = "superseded by a later override for the same change"
+        unapplied.append(brief)
+
+    methods_used = []
+    for entry in used.values():
+        methods_used.append({
+            "method_id": entry["method_id"], "name": entry["name"],
+            "version": entry["version"], "leads": entry["leads"],
+            "rows": entry["rows"], "parts": entry["parts"],
+            "segments": entry["segments_in_part"]})
+
+    # switches inside a part (segment-to-segment method changes), reported
+    # once per part with global indexes; inter-part changes are "boundaries"
+    switches = []
+    for part in range(1, parts + 1):
+        base = (part - 1) * part_rows
+        for i in range(1, len(infos)):
+            boundary = base + layout[i]["from_index"]
+            prev, cur = infos[i - 1], infos[i]
+            switches.append({
+                "at_index": boundary, "part": part,
+                "from_segment": i, "to_segment": i + 1,
+                "from_method_id": prev["method_id"],
+                "from_method": prev["name"], "from_version": prev["version"],
+                "to_method_id": cur["method_id"],
+                "to_method": cur["name"], "to_version": cur["version"],
+                "before_row": row_str(rows[boundary]),
+                "after_row": row_str(rows[boundary + 1])})
+
+    return {
+        "stage": stage,
+        "start_row": row_str(start),
+        "parts": parts,
+        "part_count": parts,
+        "touch_rows": part_rows,           # changes rung per part
+        "total_leads_per_part": total_leads_one,
+        "segment_count": len(infos),
+        "total_leads": parts * total_leads_one,
+        "total_rows": total_rows,          # changes rung over all parts
+        "rows_generated": step,
+        "distinct_rows": len(entries),     # 1 + total_rows (boundaries once)
+        "max_rows": effective_max,
+        "extent_rows": extent,
+        "status": status,                  # ok | untrue | premature_rounds | not_closed
+        "closed": closed,
+        "success": status == "ok",         # never success unless closed&true
+        "truth": {"true": first_repeat is None and closed,
+                  "conclusive": True,
+                  "checked_rows": total_rows,
+                  "first_repeat": first_repeat},
+        "premature_rounds": premature,
+        "part_end_permutation": {
+            "row": row_str(p1_end),        # part 1 end row (from start_row)
+            "canonical_row": row_str(canonical_end),  # end row from rounds
+            # position_mapping: the bell at start position p ends at position
+            # q(p) after one part (fixed for any start row).  Positions are
+            # labeled by the rounds bells (canonical 0/E/T symbols).
+            "mapping": {bell_symbol(p): bell_symbol(q)
+                        for p, q in sorted(position_map.items())},
+            "position_mapping": {p: position_map[p]
+                                 for p in sorted(position_map)},
+            "order": order,
+            "parts": parts,
+            "parts_equal_order": parts_match_order,
+            "order_divides_parts": order_divides_parts,
+            "consistent": closed == order_divides_parts,
+            "note": order_note},
+        "boundaries": boundaries,
+        "boundary_rows_counted_once": len(boundaries),
+        "switches": switches,
+        "methods_used": methods_used,
+        "part_summaries": part_summaries,
+        "overrides": all_overrides,
+        "unapplied_overrides": unapplied,
+        "problems": problems,
+        "rows": entries,
+    }
+
+
+def _multipart_summary(report):
+    keys = ("status", "success", "closed", "stage", "parts", "part_count",
+            "touch_rows", "total_rows", "total_leads", "segment_count",
+            "problems")
+    out = {k: report[k] for k in keys}
+    out["truth"] = report["truth"]
+    out["part_end_permutation"] = {
+        k: report["part_end_permutation"][k] for k in
+        ("row", "canonical_row", "order", "parts", "parts_equal_order",
+         "order_divides_parts", "consistent", "note")}
+    out["methods_used"] = [{k: m[k] for k in
+                           ("method_id", "name", "version", "leads", "rows",
+                            "parts")} for m in report["methods_used"]]
+    return out
+
+
+def compare_multipart_reports(report_a, report_b):
+    """Compare two multi-part replay reports: size, closure, truth, order."""
+    fa = report_a["truth"]["first_repeat"]
+    fb = report_b["truth"]["first_repeat"]
+    same_repeat = None
+    if fa and fb:
+        same_repeat = ((fa["first"]["index"], fa["second"]["index"])
+                       == (fb["first"]["index"], fb["second"]["index"]))
+    ids_a = {m["method_id"] for m in report_a["methods_used"]}
+    ids_b = {m["method_id"] for m in report_b["methods_used"]}
+    oa, ob = (report_a["part_end_permutation"],
+              report_b["part_end_permutation"])
+    return {
+        "a": _multipart_summary(report_a),
+        "b": _multipart_summary(report_b),
+        "same_stage": report_a["stage"] == report_b["stage"],
+        "parts_equal": report_a["parts"] == report_b["parts"],
+        "parts_delta": report_a["parts"] - report_b["parts"],
+        "total_rows_equal": report_a["total_rows"] == report_b["total_rows"],
+        "total_rows_delta": report_a["total_rows"] - report_b["total_rows"],
+        "both_closed": report_a["closed"] and report_b["closed"],
+        "both_success": (report_a["success"] and report_b["success"]),
+        "both_true": (report_a["truth"]["true"] and report_b["truth"]["true"]),
+        "first_repeat_same_position": same_repeat,
+        "part_end_permutation_equal":
+            oa["position_mapping"] == ob["position_mapping"],
+        "part_end_row_a": oa["canonical_row"],
+        "part_end_row_b": ob["canonical_row"],
+        "part_end_order_equal": oa["order"] == ob["order"],
+        "order_a": oa["order"], "order_b": ob["order"],
+        "parts_order_mismatch_a": not oa["parts_equal_order"],
+        "parts_order_mismatch_b": not ob["parts_equal_order"],
         "methods_overlap": sorted(ids_a & ids_b),
     }
 

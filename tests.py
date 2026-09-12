@@ -11,12 +11,13 @@ import urllib.error
 import urllib.request
 
 from db import Store
-from ringing import (HARD_MAX_ROWS, LimitRequiredError, NotationError,
-                     SchemeError, SplicedError, TouchSearchError, analyze,
-                     analyze_spliced, compare_music, compare_reports,
-                     compare_touch_reports, parse_notation, parse_row,
-                     parse_scheme, row_str, score_analysis, score_touch,
-                     search_touches, stroke_for_index)
+from ringing import (HARD_MAX_ROWS, LimitRequiredError, MultipartError,
+                     NotationError, SchemeError, SplicedError,
+                     TouchSearchError, analyze, analyze_multipart,
+                     analyze_spliced, compare_music, compare_multipart_reports,
+                     compare_reports, compare_touch_reports, parse_notation,
+                     parse_row, parse_scheme, row_str, score_analysis,
+                     score_touch, search_touches, stroke_for_index)
 from server import make_server
 
 # Plain Bob Minor: 12-change lead, lead head 135264, 5 leads = 60 rows, true.
@@ -732,6 +733,230 @@ class SplicedTests(unittest.TestCase):
         self.assertEqual(cmp["methods_overlap"], [1])
         self.assertEqual(cmp["a"]["status"], "ok")
         self.assertEqual(cmp["b"]["status"], "not_closed")
+
+
+class MultipartEngineTests(unittest.TestCase):
+    def test_five_one_lead_parts_replay_the_plain_course(self):
+        # one Plain Bob Minor lead per part, replayed 5 times: each part
+        # continues from the previous part's last row (never reset), so the
+        # replay is exactly the plain course
+        rep = analyze_multipart([_seg(1, PB_MINOR, 1, name="PB")], 5)
+        plain = analyze(6, PB_MINOR)
+        self.assertEqual(rep["status"], "ok")
+        self.assertTrue(rep["success"])
+        self.assertTrue(rep["closed"])
+        self.assertEqual((rep["touch_rows"], rep["total_rows"],
+                          rep["distinct_rows"], rep["parts"]),
+                         (12, 60, 61, 5))
+        self.assertEqual([r["row"] for r in rep["rows"]],
+                         [r["row"] for r in plain["rows"]])
+        self.assertEqual([r["part"] for r in rep["rows"][:14]],
+                         [0] + [1] * 12 + [2])
+        # the four inter-part boundary rows are counted once
+        self.assertEqual(rep["boundary_rows_counted_once"], 4)
+        self.assertEqual([b["at_index"] for b in rep["boundaries"]],
+                         [12, 24, 36, 48])
+        self.assertTrue(all(b["counted_once"] for b in rep["boundaries"]))
+        # part end rows are the five plain-course lead heads
+        self.assertEqual([p["end_row"] for p in rep["part_summaries"]],
+                         ["135264", "156342", "164523", "142635", "123456"])
+        self.assertEqual([(p["from_index"], p["to_index"])
+                          for p in rep["part_summaries"]],
+                         [(0, 12), (12, 24), (24, 36), (36, 48), (48, 60)])
+
+    def test_part_end_permutation_and_order(self):
+        rep = analyze_multipart([_seg(1, PB_MINOR, 1)], 5)
+        pep = rep["part_end_permutation"]
+        # the part-end row from rounds is the plain lead head
+        self.assertEqual(pep["row"], "135264")
+        self.assertEqual(pep["canonical_row"], "135264")
+        self.assertEqual(pep["order"], 5)
+        self.assertTrue(pep["parts_equal_order"])
+        self.assertTrue(pep["order_divides_parts"])
+        self.assertTrue(pep["consistent"])
+        # position map Q: after one lead the bell at start position p ends
+        # at end position q(p); rounds -> 135264 is Q's inverse row
+        self.assertEqual(pep["position_mapping"],
+                         {1: 1, 2: 4, 3: 2, 4: 6, 5: 3, 6: 5})
+        self.assertEqual(pep["mapping"],
+                         {"1": "1", "2": "4", "3": "2", "4": "6",
+                          "5": "3", "6": "5"})
+        # Q and its inverse share the cycle structure (order 5), and the
+        # inverse row is exactly the end row rung from rounds
+        self.assertEqual(pep["canonical_row"], "135264")
+        # the position permutation (and hence the order) is start-row
+        # independent; a custom start row changes "row" but not the mapping
+        other = analyze_multipart(
+            [_seg(1, PB_MINOR, 1)], 5, start_row="214365")
+        self.assertEqual(other["part_end_permutation"]["position_mapping"],
+                         pep["position_mapping"])
+        self.assertEqual(other["part_end_permutation"]["order"], 5)
+        self.assertEqual(other["part_end_permutation"]["canonical_row"],
+                         "135264")
+        # the literal part-1 end row follows the custom start row instead
+        self.assertEqual(other["part_end_permutation"]["row"], "246153")
+        self.assertNotEqual(other["part_end_permutation"]["row"], pep["row"])
+
+    def test_parts_mismatch_order_not_closed_never_success(self):
+        rep = analyze_multipart([_seg(1, PB_MINOR, 1)], 4)
+        self.assertEqual(rep["status"], "not_closed")
+        self.assertFalse(rep["success"])
+        self.assertFalse(rep["closed"])
+        pep = rep["part_end_permutation"]
+        self.assertEqual(pep["order"], 5)
+        self.assertFalse(pep["parts_equal_order"])
+        self.assertFalse(pep["order_divides_parts"])
+        self.assertTrue(pep["consistent"])  # not dividing and not closing agree
+        self.assertEqual(rep["rows"][-1]["row"], "142635")
+        self.assertIn("parts_order_mismatch", rep["problems"])
+        self.assertIn("not_closed", rep["problems"])
+
+    def test_parts_multiple_of_order_is_premature_and_untrue(self):
+        # 10 parts: the course closes again after 5 (part 5's last row is
+        # rounds before the final row) -> premature return + repeat, even
+        # though the very end row is rounds too
+        rep = analyze_multipart([_seg(1, PB_MINOR, 1)], 10)
+        self.assertTrue(rep["closed"])
+        self.assertEqual(rep["status"], "premature_rounds")
+        self.assertFalse(rep["success"])
+        self.assertFalse(rep["truth"]["true"])
+        self.assertEqual(rep["premature_rounds"],
+                         {"index": 60, "part": 5, "segment": 1,
+                          "lead": 1, "change": 12})
+        repeat = rep["truth"]["first_repeat"]
+        self.assertEqual(repeat["row"], "123456")
+        self.assertEqual(repeat["first"],
+                         {"index": 0, "part": 0, "segment": 0,
+                          "lead": 0, "change": 0})
+        self.assertEqual(repeat["second"],
+                         {"index": 60, "part": 5, "segment": 1,
+                          "lead": 1, "change": 12})
+        self.assertIn("parts_order_mismatch", rep["problems"])
+
+    def test_bob_part_order_three_closes_true(self):
+        # one lead with a bob 14 at change 12: the part-end permutation has
+        # order 3, so three parts close true (the classic 36-row touch)
+        seg = _seg(1, PB_MINOR, 1, overrides=[
+            {"lead": 1, "change": 12, "notation": "14"}])
+        rep = analyze_multipart([seg], 3)
+        self.assertEqual(rep["status"], "ok")
+        self.assertTrue(rep["success"])
+        self.assertTrue(rep["closed"])
+        self.assertEqual(rep["part_end_permutation"]["order"], 3)
+        self.assertEqual(rep["total_rows"], 36)
+        self.assertTrue(rep["truth"]["true"])
+        # the override is replayed in every part and its source is tagged
+        override_rows = [e for e in rep["rows"] if e["override"]]
+        self.assertEqual([(e["part"], e["index"]) for e in override_rows],
+                         [(1, 12), (2, 24), (3, 36)])
+        self.assertEqual(override_rows[0]["override"]["notation"], "14")
+        # the override report points at its first application (part 1)
+        ovr = rep["overrides"][0]
+        self.assertTrue(ovr["applied"])
+        self.assertEqual((ovr["part"], ovr["row_index"]), (1, 12))
+        self.assertEqual(ovr["before_row"], "132546")
+        self.assertEqual(ovr["after_row"], "123564")
+
+    def test_cross_part_repeat_located_with_part(self):
+        # within one part a repeat is located with its part/segment
+        rep = analyze_multipart([_seg(1, "x.14.x", 1, stage=4),
+                                 _seg(2, "x.14.x", 1, stage=4)], 1)
+        repeat = rep["truth"]["first_repeat"]
+        self.assertEqual(repeat["first"]["part"], 1)
+        self.assertEqual(repeat["second"],
+                         {"index": 4, "part": 1, "segment": 2,
+                          "lead": 1, "change": 1})
+        # a true, closing part replayed twice: part 2 opens on rows part 1
+        # already rang, so the first repeat sits at the part-1/part-2 boundary
+        rep = analyze_multipart([_seg(1, PB_MINOR, 5)], 2)
+        self.assertEqual(rep["status"], "premature_rounds")
+        repeat = rep["truth"]["first_repeat"]
+        self.assertEqual(repeat["row"], "123456")
+        self.assertEqual(repeat["first"],
+                         {"index": 0, "part": 0, "segment": 0,
+                          "lead": 0, "change": 0})
+        self.assertEqual(repeat["second"],
+                         {"index": 60, "part": 1, "segment": 1,
+                          "lead": 5, "change": 12})
+        # part 2 then re-rings part 1's rows: its very first row repeats the
+        # global row 1, i.e. the first cross-part repeat is at index 61
+        dup = next(e for e in rep["rows"][61:] if e["repeat"])
+        self.assertEqual((dup["index"], dup["part"], dup["segment"]),
+                         (61, 2, 1))
+        self.assertEqual(dup["row"], rep["rows"][1]["row"])
+
+    def test_switches_inside_parts_and_boundaries_between_parts(self):
+        segs = [_seg(1, PB_MINOR, 1, name="PB"),
+                _seg(2, PB_MINOR, 1, name="PB2")]
+        rep = analyze_multipart(segs, 2)
+        # one intra-part switch per part at the segment boundary
+        self.assertEqual([(s["part"], s["at_index"]) for s in rep["switches"]],
+                         [(1, 12), (2, 36)])
+        # one inter-part boundary between parts 1 and 2 at global row 24
+        (bd,) = rep["boundaries"]
+        self.assertEqual(bd["between_parts"], [1, 2])
+        self.assertEqual((bd["at_index"], bd["row"]), (24, "156342"))
+        self.assertEqual((bd["from_method"], bd["to_method"]),
+                         ("PB2", "PB"))
+        self.assertTrue(bd["counted_once"])
+        # methods aggregated over both parts
+        used = {m["method_id"]: m for m in rep["methods_used"]}
+        self.assertEqual(used[1]["parts"], [1, 2])
+        self.assertEqual(used[1]["leads"], 2)
+        self.assertEqual(used[1]["rows"], 24)
+
+    def test_compare_multipart_reports(self):
+        a = analyze_multipart([_seg(1, PB_MINOR, 1)], 5)
+        b = analyze_multipart([_seg(1, PB_MINOR, 1)], 4)
+        cmp = compare_multipart_reports(a, b)
+        self.assertTrue(cmp["same_stage"])
+        self.assertFalse(cmp["parts_equal"])
+        self.assertEqual(cmp["parts_delta"], 1)
+        self.assertFalse(cmp["both_closed"])
+        self.assertFalse(cmp["both_success"])
+        self.assertTrue(cmp["part_end_permutation_equal"])
+        self.assertEqual((cmp["order_a"], cmp["order_b"]), (5, 5))
+        self.assertTrue(cmp["parts_order_mismatch_b"])
+        self.assertFalse(cmp["parts_order_mismatch_a"])
+        c = analyze_multipart([_seg(1, PB_MINOR, 1, overrides=[
+            {"lead": 1, "change": 12, "notation": "14"}])], 3)
+        cmp2 = compare_multipart_reports(a, c)
+        self.assertFalse(cmp2["part_end_permutation_equal"])
+        self.assertEqual(cmp2["order_b"], 3)
+
+    def test_bad_parts_and_too_large_refused(self):
+        seg = [_seg(1, PB_MINOR, 1)]
+        for bad in (0, -1, "5", 1.5, True, None):
+            with self.assertRaises(MultipartError) as ctx:
+                analyze_multipart(seg, bad)
+            self.assertEqual(ctx.exception.code, "bad_parts")
+        # 83,334 parts of 12 rows = 1,000,008 > the hard cap; a replay
+        # fitting the cap is expanded (its truth is still reported honestly)
+        with self.assertRaises(MultipartError) as ctx:
+            analyze_multipart(seg, 83334, max_rows=HARD_MAX_ROWS)
+        err = ctx.exception
+        self.assertEqual(err.code, "too_large")
+        self.assertEqual(err.extra["total_rows"], 1000008)
+        self.assertEqual(err.extra["hard_max_rows"], HARD_MAX_ROWS)
+        rep = analyze_multipart(seg, 100, max_rows=HARD_MAX_ROWS)
+        self.assertEqual(rep["total_rows"], 1200)
+        # 100 is a multiple of order 5: the end row is rounds, but the course
+        # rang round 20 times -> premature/repeated, never a success
+        self.assertTrue(rep["closed"])
+        self.assertFalse(rep["success"])
+        self.assertIn("parts_order_mismatch", rep["problems"])
+        # the cap boundary itself is accepted, one change past it refused:
+        # 2 changes/part, cap 10 -> 5 parts (10 rows) accepted, 6 refused
+        two = _seg(1, "x.x", 1, stage=4)
+        at_limit = analyze_multipart([two], 5, max_rows=10)
+        self.assertEqual(at_limit["total_rows"], 10)
+        with self.assertRaises(MultipartError) as ctx:
+            analyze_multipart([two], 6, max_rows=10)
+        self.assertEqual(ctx.exception.code, "too_large")
+        self.assertEqual(ctx.exception.extra["total_rows"], 12)
+        # bad segment specs are still SplicedError, located to the segment
+        with self.assertRaises(SplicedError):
+            analyze_multipart([_seg(1, PB_MINOR, 0)], 2)
 
 
 class TouchSearchTests(unittest.TestCase):
@@ -2321,6 +2546,285 @@ class TouchSearchApiTests(unittest.TestCase):
             payload = json.loads(resp.read().decode())
         self.assertEqual(payload["report"]["result_count"], s["result_count"])
         self.assertIn("config", payload)
+
+
+class MultipartApiTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.server = make_server("127.0.0.1", 0, ":memory:")
+        cls.port = cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.base = f"http://127.0.0.1:{cls.port}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.server.store.close()
+
+    def call(self, method, path, body=None, expect=200):
+        req = urllib.request.Request(self.base + path, method=method)
+        data = json.dumps(body).encode() if body is not None else None
+        if data is not None:
+            req.add_header("Content-Type", "application/json")
+        try:
+            with urllib.request.urlopen(req, data=data) as resp:
+                return resp.status, json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            payload = json.loads(e.read().decode())
+            if e.code != expect:
+                raise AssertionError(f"{method} {path}: got {e.code} {payload}")
+            return e.code, payload
+
+    def setUp(self):
+        status, self.pb = self.call("POST", "/api/methods",
+                                    {"name": "Replay PB Minor", "stage": 6,
+                                     "notation": PB_MINOR})
+        # base touch: a single plain lead (part-end permutation order 5)
+        status, self.touch = self.call("POST", "/api/touches",
+                                       {"segments": [
+                                           {"method_id": self.pb["id"],
+                                            "leads": 1}]})
+        self.tid = self.touch["id"]
+        # a base touch carrying a bob override
+        status, self.bob_touch = self.call("POST", "/api/touches",
+                                           {"segments": [
+                                               {"method_id": self.pb["id"],
+                                                "leads": 1,
+                                                "overrides": [
+                                                    {"lead": 1, "change": 12,
+                                                     "notation": "14"}]}]})
+
+    def test_26_replay_from_touch_is_plain_course(self):
+        status, r = self.call("POST", "/api/multipart-touches",
+                              {"touch_id": self.tid, "parts": 5})
+        self.assertEqual(status, 201)
+        self.assertEqual(r["status"], "ok")
+        self.assertTrue(r["success"])
+        self.assertTrue(r["closed"])
+        self.assertEqual((r["parts"], r["touch_rows"], r["total_rows"],
+                          r["distinct_rows"]), (5, 12, 60, 61))
+        self.assertEqual(r["boundary_rows_counted_once"], 4)
+        pep = r["part_end_permutation"]
+        self.assertEqual(pep["canonical_row"], "135264")
+        self.assertEqual(pep["order"], 5)
+        self.assertTrue(pep["parts_equal_order"])
+        self.assertTrue(pep["order_divides_parts"])
+        self.assertTrue(pep["consistent"])
+        self.assertTrue(r["truth"]["true"])
+        self.assertEqual(r["problems"], [])
+        self.assertEqual(r["touch_id"], self.tid)
+        for link in ("report", "rows", "download"):
+            self.assertIn(link, r["links"])
+
+    def test_27_full_report_part_summaries_boundaries_and_rows(self):
+        status, r = self.call("POST", "/api/multipart-touches",
+                              {"touch_id": self.tid, "parts": 5})
+        rid = r["id"]
+        status, full = self.call("GET", f"/api/multipart-touches/{rid}")
+        rep = full["report"]
+        self.assertEqual(full["segments"],
+                         [{"method_id": self.pb["id"], "leads": 1}])
+        self.assertEqual([(p["part"], p["from_index"], p["to_index"],
+                           p["start_row"], p["end_row"])
+                          for p in rep["part_summaries"]],
+                         [(1, 0, 12, "123456", "135264"),
+                          (2, 12, 24, "135264", "156342"),
+                          (3, 24, 36, "156342", "164523"),
+                          (4, 36, 48, "164523", "142635"),
+                          (5, 48, 60, "142635", "123456")])
+        self.assertEqual([b["at_index"] for b in rep["boundaries"]],
+                         [12, 24, 36, 48])
+        self.assertTrue(all(b["counted_once"] for b in rep["boundaries"]))
+        # rows paged by part: part 1 starts at index 0, part P>1 includes the
+        # boundary row shared with part P-1
+        status, p1 = self.call("GET",
+                               f"/api/multipart-touches/{rid}/rows?part=1")
+        self.assertEqual([x["index"] for x in p1["rows"]], list(range(0, 13)))
+        status, p2 = self.call("GET",
+                               f"/api/multipart-touches/{rid}/rows?part=2")
+        self.assertEqual([x["index"] for x in p2["rows"]], list(range(12, 25)))
+        self.assertEqual(p2["rows"][0]["row"], "135264")
+        self.assertEqual(p2["rows"][0]["part"], 1)  # boundary tagged part 1
+        self.assertTrue(all(x["part"] in (1, 2) for x in p2["rows"]))
+        # part + segment + global slice
+        status, page = self.call(
+            "GET", f"/api/multipart-touches/{rid}/rows?part=3&segment=1"
+                   "&from=25&to=27")
+        self.assertEqual([x["index"] for x in page["rows"]], [25, 26, 27])
+        self.assertTrue(all(x["part"] == 3 for x in page["rows"]))
+        # part 0 is just the index-0 row
+        status, p0 = self.call("GET",
+                               f"/api/multipart-touches/{rid}/rows?part=0")
+        self.assertEqual([x["index"] for x in p0["rows"]], [0])
+
+    def test_28_parts_order_mismatch_never_success(self):
+        status, r = self.call("POST", "/api/multipart-touches",
+                              {"touch_id": self.tid, "parts": 4})
+        self.assertEqual(status, 201)
+        self.assertEqual(r["status"], "not_closed")
+        self.assertFalse(r["success"])
+        self.assertFalse(r["closed"])
+        pep = r["part_end_permutation"]
+        self.assertEqual(pep["order"], 5)
+        self.assertFalse(pep["parts_equal_order"])
+        self.assertFalse(pep["order_divides_parts"])
+        self.assertTrue(pep["consistent"])
+        self.assertIn("not a multiple", pep["note"])
+        self.assertEqual(r["problems"], ["not_closed", "parts_order_mismatch"])
+        # 10 parts is a multiple of order 5: closes but repeats the cycle
+        status, r10 = self.call("POST", "/api/multipart-touches",
+                                {"touch_id": self.tid, "parts": 10})
+        self.assertTrue(r10["closed"])
+        self.assertFalse(r10["success"])
+        self.assertEqual(r10["status"], "premature_rounds")
+        self.assertTrue(r10["part_end_permutation"]["order_divides_parts"])
+        self.assertFalse(r10["truth"]["true"])
+        self.assertEqual(r10["truth"]["first_repeat"]["second"]["index"], 60)
+
+    def test_29_bob_touch_three_parts_closes(self):
+        # the bobbing part-end permutation has order 3
+        status, r = self.call("POST", "/api/multipart-touches",
+                              {"touch_id": self.bob_touch["id"], "parts": 3})
+        self.assertEqual(r["status"], "ok")
+        self.assertTrue(r["success"])
+        self.assertEqual(r["total_rows"], 36)
+        self.assertEqual(r["part_end_permutation"]["order"], 3)
+        rid = r["id"]
+        status, full = self.call("GET", f"/api/multipart-touches/{rid}")
+        # the override fires once per part; the report records part 1 first
+        ovr = full["report"]["overrides"][0]
+        self.assertTrue(ovr["applied"])
+        self.assertEqual((ovr["part"], ovr["row_index"], ovr["after_row"]),
+                         (1, 12, "123564"))
+        status, rows = self.call(
+            "GET", f"/api/multipart-touches/{rid}/rows?part=3&segment=1")
+        # the part page also includes the boundary row from part 2 (which
+        # carries part 2's override), so the part-3 override is the entry
+        # tagged with part 3
+        override_rows = [x for x in rows["rows"]
+                         if x["override"] and x["part"] == 3]
+        self.assertEqual(len(override_rows), 1)  # one override per part
+        last = override_rows[0]
+        self.assertEqual((last["part"], last["index"]), (3, 36))
+        self.assertEqual(last["override"]["part"], 3)
+
+    def test_30_listing_compare_and_download(self):
+        status, a = self.call("POST", "/api/multipart-touches",
+                              {"touch_id": self.tid, "parts": 5})
+        status, b = self.call("POST", "/api/multipart-touches",
+                              {"touch_id": self.tid, "parts": 4})
+        status, lst = self.call("GET", "/api/multipart-touches")
+        self.assertTrue(any(x["id"] == a["id"]
+                            for x in lst["multipart_touches"]))
+        status, lst = self.call(
+            "GET", f"/api/multipart-touches?touch_id={self.tid}")
+        self.assertTrue(all(x["touch_id"] == self.tid
+                            for x in lst["multipart_touches"]))
+        status, cmp = self.call(
+            "GET", f"/api/multipart-touches/compare?a={a['id']}&b={b['id']}")
+        self.assertEqual(status, 200)
+        c = cmp["comparison"]
+        self.assertFalse(c["parts_equal"])
+        self.assertEqual(c["parts_delta"], 1)
+        self.assertFalse(c["both_closed"])
+        self.assertFalse(c["both_success"])
+        self.assertTrue(c["part_end_permutation_equal"])
+        self.assertEqual((c["order_a"], c["order_b"]), (5, 5))
+        self.assertTrue(c["parts_order_mismatch_b"])
+        # POST compare too
+        status, cmp2 = self.call("POST", "/api/multipart-touches/compare",
+                                 {"a": a["id"], "b": b["id"]})
+        self.assertEqual(status, 200)
+        # download
+        req = urllib.request.Request(
+            self.base + f"/api/multipart-touches/{a['id']}/download")
+        with urllib.request.urlopen(req) as resp:
+            self.assertEqual(resp.status, 200)
+            self.assertIn("attachment", resp.headers["Content-Disposition"])
+            payload = json.loads(resp.read().decode())
+        self.assertEqual(payload["report"]["total_rows"], 60)
+        self.assertEqual(payload["parts"], 5)
+
+    def test_31_inline_segments_create_works(self):
+        status, r = self.call("POST", "/api/multipart-touches",
+                              {"segments": [
+                                  {"method_id": self.pb["id"], "leads": 1}],
+                               "parts": 5})
+        self.assertEqual(status, 201)
+        self.assertTrue(r["success"])
+        self.assertIsNone(r["touch_id"])
+
+    def test_32_errors_rejected_and_not_stored(self):
+        status, before = self.call("GET", "/api/multipart-touches")
+        n_before = len(before["multipart_touches"])
+        # base touch missing -> 404 not_found, nothing stored
+        status, out = self.call("POST", "/api/multipart-touches",
+                                {"touch_id": 999999, "parts": 5}, expect=404)
+        self.assertEqual(out["code"], "not_found")
+        self.assertEqual(out["touch_id"], 999999)
+        # bad part counts -> bad_parts
+        for bad in (0, -3, "5", 2.5, True):
+            status, out = self.call("POST", "/api/multipart-touches",
+                                    {"touch_id": self.tid, "parts": bad},
+                                    expect=400)
+            self.assertEqual(out["code"], "bad_parts", bad)
+        # missing parts
+        status, out = self.call("POST", "/api/multipart-touches",
+                                {"touch_id": self.tid}, expect=400)
+        self.assertEqual(out["code"], "bad_parts")
+        # over the hard limit: 83,334 x 12 = 1,000,008
+        status, out = self.call("POST", "/api/multipart-touches",
+                                {"touch_id": self.tid, "parts": 83334},
+                                expect=400)
+        self.assertEqual(out["code"], "too_large")
+        self.assertEqual(out["total_rows"], 1000008)
+        self.assertEqual(out["hard_max_rows"], HARD_MAX_ROWS)
+        # max_rows over the hard cap is a plain bad field
+        status, out = self.call("POST", "/api/multipart-touches",
+                                {"touch_id": self.tid, "parts": 1,
+                                 "max_rows": HARD_MAX_ROWS + 1}, expect=400)
+        self.assertEqual(out["code"], "bad_field")
+        # inline segment with unknown method -> 404 located to the segment
+        status, out = self.call("POST", "/api/multipart-touches",
+                                {"segments": [
+                                    {"method_id": 999999, "leads": 1}],
+                                 "parts": 1}, expect=404)
+        self.assertEqual(out["code"], "not_found")
+        self.assertEqual(out["segment"], 1)
+        # bad segment spec (leads 0) -> bad_segment
+        status, out = self.call("POST", "/api/multipart-touches",
+                                {"segments": [
+                                    {"method_id": self.pb["id"], "leads": 0}],
+                                 "parts": 1}, expect=400)
+        self.assertEqual(out["code"], "bad_segment")
+        self.assertEqual(out["segment"], 1)
+        # missing replay / bad paging params on reads: create one valid
+        # replay first (the ONLY one this test stores)
+        status, made = self.call("POST", "/api/multipart-touches",
+                                 {"touch_id": self.tid, "parts": 5})
+        rid = made["id"]
+        status, out = self.call("GET", "/api/multipart-touches/9999",
+                                expect=404)
+        self.assertEqual(out["code"], "not_found")
+        status, out = self.call(
+            "GET", f"/api/multipart-touches/{rid}/rows?part=9", expect=404)
+        self.assertEqual(out["code"], "not_found")
+        status, out = self.call(
+            "GET", f"/api/multipart-touches/{rid}/rows?part=x", expect=400)
+        self.assertEqual(out["code"], "bad_field")
+        status, out = self.call(
+            "GET", f"/api/multipart-touches/{rid}/rows?segment=9", expect=404)
+        # compare missing ids
+        status, out = self.call("GET", "/api/multipart-touches/compare",
+                                expect=400)
+        status, out = self.call(
+            "GET", f"/api/multipart-touches/compare?a={rid}&b=9999",
+            expect=404)
+        # only the one valid replay was stored; every rejection stored nothing
+        status, after = self.call("GET", "/api/multipart-touches")
+        self.assertEqual(len(after["multipart_touches"]), n_before + 1)
 
 
 if __name__ == "__main__":
