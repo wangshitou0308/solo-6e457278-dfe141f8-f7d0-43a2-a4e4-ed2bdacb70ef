@@ -231,10 +231,11 @@ class StageTenTwelveParseTests(unittest.TestCase):
         # duplicate check runs before the length check, pointing at 2nd E
         self.assertEqual((ctx.exception.token, ctx.exception.offset), ("E", 10))
         # the separated form accepts 10/11/12 as integers; a 13-token row
-        # trips the length check before the duplicate check
+        # trips the length check before the duplicate check, pointing just
+        # past the last source token (index 27 + length 1 = 28)
         with self.assertRaises(NotationError) as ctx:
             parse_row("1 2 3 4 5 6 7 8 9 10 11 12 1", 12)
-        self.assertEqual(ctx.exception.offset, 13)
+        self.assertEqual(ctx.exception.offset, 28)
         # a 12-token permutation with a duplicate gets the symbol location
         with self.assertRaises(NotationError) as ctx:
             parse_row("1 2 3 4 5 6 7 8 9 10 11 1", 12)
@@ -242,6 +243,36 @@ class StageTenTwelveParseTests(unittest.TestCase):
         with self.assertRaises(NotationError) as ctx:
             parse_row([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 5], 12)
         self.assertEqual((ctx.exception.token, ctx.exception.offset), (5, 11))
+
+    def test_row_offsets_with_leading_whitespace(self):
+        # leading whitespace/separators must be counted in the source offset:
+        # the duplicate E sits at index 12 in " 1234567890EE"
+        with self.assertRaises(NotationError) as ctx:
+            parse_row(" 1234567890EE", 12)
+        self.assertEqual((ctx.exception.token, ctx.exception.offset), ("E", 12))
+        with self.assertRaises(NotationError) as ctx:
+            parse_row("\t1234567890EE", 12)
+        self.assertEqual((ctx.exception.token, ctx.exception.offset), ("E", 12))
+        with self.assertRaises(NotationError) as ctx:
+            parse_row("..1234567890EE", 12)
+        self.assertEqual((ctx.exception.token, ctx.exception.offset), ("E", 13))
+        # trailing whitespace must not shift an earlier symbol
+        with self.assertRaises(NotationError) as ctx:
+            parse_row("1234567890EE ", 12)
+        self.assertEqual((ctx.exception.token, ctx.exception.offset), ("E", 11))
+        # length error points just past the last source symbol
+        with self.assertRaises(NotationError) as ctx:
+            parse_row("   1234567890E", 12)
+        self.assertEqual(ctx.exception.token, "   1234567890E")
+        self.assertEqual(ctx.exception.offset, 14)
+        self.assertIn("missing", ctx.exception.message)
+        # separated form with leading padding keeps the source offset too
+        with self.assertRaises(NotationError) as ctx:
+            parse_row(" 2, 1, 1, 4, 5, 6", 6)
+        self.assertEqual((ctx.exception.token, ctx.exception.offset), ("1", 7))
+        # leading padding is accepted on valid rows
+        self.assertEqual(parse_row(" 1234567890ET", 12), tuple(range(1, 13)))
+        self.assertEqual(parse_row(" 1 2 3 4 5 6 ", 6), tuple(range(1, 7)))
 
     def test_row_illegal_symbol_located(self):
         with self.assertRaises(NotationError) as ctx:
@@ -1056,6 +1087,15 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(out["code"], "notation_error")
         self.assertEqual(out["token"], "E")
         self.assertEqual(out["offset"], 11)
+        # leading whitespace is part of the source string and shifts offset
+        status, out = self.call("POST", "/api/methods",
+                                {"name": "Bad Row", "stage": 12, "notation": "x",
+                                 "start_row": " 1234567890EE"}, expect=400)
+        self.assertEqual((out["token"], out["offset"]), ("E", 12))
+        status, out = self.call("POST", "/api/parse",
+                                {"stage": 12, "notation": "x",
+                                 "start_row": " 1234567890ET"})
+        self.assertEqual(out["start_row"], ROUNDS_12)
         # missing bell (wrong length) likewise keeps token + offset
         status, out = self.call("POST", "/api/methods",
                                 {"name": "Bad Row", "stage": 12, "notation": "x",

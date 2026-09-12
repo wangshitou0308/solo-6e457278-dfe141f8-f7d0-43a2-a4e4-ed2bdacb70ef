@@ -81,7 +81,7 @@ python3 server.py --host 127.0.0.1 --port 8000 --db ringing.db
 测试与演示：
 
 ```bash
-python3 tests.py       # 64 个单元/接口测试
+python3 tests.py       # 65 个单元/接口测试
 python3 examples.py    # 端到端演示（需先启动 server）
 ```
 
@@ -198,33 +198,41 @@ curl -s -X POST localhost:8000/api/analyses -d '{
 
 ### 10 口（Royal）与 12 口（Maximus）示例
 
+新建数据库后方法 id 由自增序列决定，下面的命令**直接接续使用创建响应里的
+`id`**（用标准库 `python3` 解析 JSON），可整段复制执行：
+
 ```bash
 # Plain Bob Royal（10 口）："10" 是 places 1 与 10；必须显式给 max_rows
-curl -s -X POST localhost:8000/api/methods -d '{
+RID=$(curl -s -X POST localhost:8000/api/methods -d '{
   "name": "Plain Bob Royal", "stage": 10,
-  "notation": "x10x10x10x10x10,12", "start_row": "1234567890"}'
-curl -s -X POST localhost:8000/api/analyses -d '{"method_id": 100, "max_rows": 180}'
+  "notation": "x10x10x10x10x10,12", "start_row": "1234567890"}' \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+curl -s -X POST localhost:8000/api/analyses \
+  -d '{"method_id":'"$RID"', "max_rows": 180}'
 # lead head "1352749608"，整 course 180 行闭合、true
 
 # Plain Bob Maximus（12 口）：1T 是 places 1 与 12
-curl -s -X POST localhost:8000/api/methods -d '{
+MID=$(curl -s -X POST localhost:8000/api/methods -d '{
   "name": "Plain Bob Maximus", "stage": 12,
-  "notation": "x1Tx1Tx1Tx1Tx1Tx1T,12"}'
+  "notation": "x1Tx1Tx1Tx1Tx1Tx1T,12"}' \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
 # 只检查前 240 行：未闭合，truth 不下结论
-curl -s -X POST localhost:8000/api/analyses -d '{"method_id": 101, "max_rows": 240}'
+curl -s -X POST localhost:8000/api/analyses \
+  -d '{"method_id":'"$MID"', "max_rows": 240}'
 # {"status":"exceeded_limit","closed":false,
 #  "truth":{"true":null,"conclusive":false,"checked_rows":240,"first_repeat":null},
 #  "problems":["exceeded_limit","not_closed","truth_inconclusive"]}
 
-# 不传 max_rows：作业被拒绝
+# 不传 max_rows：作业被拒绝（同样接续使用上面的 $MID）
+curl -s -X POST localhost:8000/api/analyses -d '{"method_id":'"$MID"'}'
 # {"code":"limit_required","stage":12,"extent_rows":479001600,
 #  "hard_max_rows":1000000,"error":"stage 12: one extent is 479,001,600 rows ..."}
 
-# 紧凑 row 重复定位（数组输入用整数）
+# 紧凑 row 重复定位（数组输入用整数）；offset 按原始字符串计，前导空白也算
 curl -s -X POST localhost:8000/api/methods -d '{
-  "name":"X","stage":12,"notation":"x","start_row":"1234567890EE"}'
+  "name":"X","stage":12,"notation":"x","start_row":" 1234567890EE"}'
 # {"code":"notation_error","error":"bell 11 appears more than once in the row",
-#  "token":"E","offset":11}
+#  "token":"E","offset":12}
 ```
 
 ### 比较两版

@@ -178,31 +178,37 @@ curl -sOJ localhost:8000/api/touches/1/download</pre>
 {"error": "total rows 84 exceed the limit of 60", "code": "bad_segment",
  "segment": 3, "total_rows": 84, "max_rows": 60}</pre>
 <h2>示例：10 口（Royal）与 12 口（Maximus）</h2>
+<p>新建数据库后方法 id 取决于自增序列，下面的命令<strong>直接接续使用创建响应里的
+<code>id</code></strong>（用标准库 <code>python3</code> 解析 JSON），可整段复制执行：</p>
 <pre># 创建 Plain Bob Royal（10 口）：x10 的“10”是 places 1 与 10；
 # 10! 超过硬上限，必须显式给 max_rows
-curl -s -X POST localhost:8000/api/methods -d '{"name":"Plain Bob Royal","stage":10,
-  "notation":"x10x10x10x10x10,12","start_row":"1234567890"}'
-curl -s -X POST localhost:8000/api/analyses -d '{"method_id":100,"max_rows":180}'
+RID=$(curl -s -X POST localhost:8000/api/methods -d '{"name":"Plain Bob Royal","stage":10,
+  "notation":"x10x10x10x10x10,12","start_row":"1234567890"}' \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+curl -s -X POST localhost:8000/api/analyses \
+  -d '{"method_id":'"$RID"',"max_rows":180}'
 # lead head 为 1352749608；整 course 180 行，闭合且 true
 
 # 12 口 Plain Bob Maximus；只检查前 240 行 -> 未闭合、truth 不下结论
-curl -s -X POST localhost:8000/api/methods -d '{"name":"Plain Bob Maximus","stage":12,
-  "notation":"x1Tx1Tx1Tx1Tx1Tx1T,12"}'
-curl -s -X POST localhost:8000/api/analyses -d '{"method_id":101,"max_rows":240}'
+MID=$(curl -s -X POST localhost:8000/api/methods -d '{"name":"Plain Bob Maximus","stage":12,
+  "notation":"x1Tx1Tx1Tx1Tx1Tx1T,12"}' \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+curl -s -X POST localhost:8000/api/analyses \
+  -d '{"method_id":'"$MID"',"max_rows":240}'
 # -> {"status":"exceeded_limit","closed":false,
 #     "truth":{"true":null,"conclusive":false,"checked_rows":240,"first_repeat":null},
 #     "problems":["exceeded_limit","not_closed","truth_inconclusive"]}
 
 # 不传 max_rows 会被拒绝（错误码 limit_required）
-curl -s -X POST localhost:8000/api/analyses -d '{"method_id":101}'
+curl -s -X POST localhost:8000/api/analyses -d '{"method_id":'"$MID"'}'
 # -> {"code":"limit_required","error":"stage 12: one extent is 479,001,600 rows
 #     which exceeds the hard limit of 1,000,000; pass an explicit max_rows ...",
 #     "stage":12,"extent_rows":479001600,"hard_max_rows":1000000}
 
-# 紧凑 row 的重复/缺漏定位（数组输入用整数）
+# 紧凑 row 的重复/缺漏定位（数组输入用整数）；offset 按原始字符串计，前导空白也算
 curl -s -X POST localhost:8000/api/methods -d '{"name":"X","stage":12,
-  "notation":"x","start_row":"1234567890EE"}'
-# -> {"code":"notation_error","token":"E","offset":11,"error":"bell 11 appears ..."}</pre>
+  "notation":"x","start_row":" 1234567890EE"}'
+# -> {"code":"notation_error","token":"E","offset":12,"error":"bell 11 appears ..."}</pre>
 
 <p>更多说明见仓库 <code>README.md</code>；演示脚本：<code>python3 examples.py</code>。</p>
 </body>

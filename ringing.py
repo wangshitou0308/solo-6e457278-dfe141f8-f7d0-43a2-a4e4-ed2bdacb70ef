@@ -338,11 +338,16 @@ def parse_row(value, stage):
             pieces.append((v, v, i))
         token_text = "[" + ",".join(str(p[0]) for p in pieces) + "]"
     elif isinstance(value, str):
-        text = value.replace(",", " ").replace(".", " ").strip()
+        # separators are replaced one-for-one, so normalized has the same
+        # length as value; positions inside `text` map back to value via the
+        # stripped leading prefix (leading spaces, commas or dots).
+        normalized = value.replace(",", " ").replace(".", " ")
+        text = normalized.strip()
         if not text:
             raise NotationError("start_row must not be empty",
                                 token=value, offset=0)
         token_text = value
+        base = normalized.find(text)  # offset of the first token in value
         compact = not any(c.isspace() for c in text)
         if compact:
             # compact row: each single character is one bell symbol
@@ -352,8 +357,10 @@ def parse_row(value, stage):
                     raise NotationError(
                         f"invalid bell symbol {ch!r} for {stage} bells "
                         f"(bells above 9 are written 0=10, E=11, T=12)",
-                        token=ch, offset=i)
-                pieces.append((bell, ch, i))
+                        token=ch, offset=base + i)
+                pieces.append((bell, ch, base + i))
+            # position just past the last symbol in the source string
+            end_offset = base + len(text)
         else:
             # separated tokens: plain integers 10/11/12 or single symbols
             search_from = 0
@@ -366,6 +373,7 @@ def parse_row(value, stage):
                         f"invalid bell token {tok!r} for {stage} bells",
                         token=tok, offset=pos)
                 pieces.append((bell, tok, pos))
+            end_offset = pieces[-1][2] + len(pieces[-1][1])
     else:
         raise ValueError("start_row must be a string or a list of bells")
 
@@ -378,10 +386,13 @@ def parse_row(value, stage):
             detail += ": missing bell(s) " + "".join(bell_symbol(b) for b in missing)
         if extras:
             detail += "; bell(s) out of stage: " + ",".join(map(str, extras))
+        # strings: offset just past the last source token; arrays: element
+        # index one past the last element
+        length_offset = end_offset if isinstance(value, str) else len(pieces)
         raise NotationError(
             f"row has {len(pieces)} bells, expected {stage} "
             f"(each bell 1..{stage} exactly once){detail}",
-            token=token_text, offset=len(pieces))
+            token=token_text, offset=length_offset)
     seen = set()
     for bell, token, offset in pieces:
         if bell in seen:
@@ -394,7 +405,8 @@ def parse_row(value, stage):
         raise NotationError(
             f"row is not a permutation of 1..{stage}: missing bell(s) "
             + "".join(bell_symbol(b) for b in missing),
-            token=token_text, offset=len(pieces))
+            token=token_text,
+            offset=(end_offset if isinstance(value, str) else len(pieces)))
     return tuple(bell for bell, _, _ in pieces)
 
 
