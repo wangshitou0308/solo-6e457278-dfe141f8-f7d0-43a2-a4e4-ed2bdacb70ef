@@ -12,9 +12,10 @@ import urllib.request
 
 from db import Store
 from ringing import (HARD_MAX_ROWS, LimitRequiredError, NotationError,
-                     SplicedError, analyze, analyze_spliced, compare_reports,
-                     compare_touch_reports, parse_notation, parse_row,
-                     row_str)
+                     SchemeError, SplicedError, analyze, analyze_spliced,
+                     compare_music, compare_reports, compare_touch_reports,
+                     parse_notation, parse_row, parse_scheme, row_str,
+                     score_analysis, score_touch, stroke_for_index)
 from server import make_server
 
 # Plain Bob Minor: 12-change lead, lead head 135264, 5 leads = 60 rows, true.
@@ -732,6 +733,373 @@ class SplicedTests(unittest.TestCase):
         self.assertEqual(cmp["b"]["status"], "not_closed")
 
 
+class SchemeParseTests(unittest.TestCase):
+    def scheme(self, rules, stage=6, name="s"):
+        return parse_scheme({"name": name, "rules": rules}, stage=stage)
+
+    def test_rule_defaults(self):
+        s = self.scheme([{"name": "r", "kind": "run", "min_length": 3}])
+        (r,) = s["rules"]
+        self.assertEqual(r["direction"], "both")
+        self.assertEqual(r["position"], "any")
+        self.assertEqual(r["weight"], 1)
+        self.assertEqual(r["strokes"], ["hand", "back"])
+        self.assertEqual(r["lead_end"], "any")
+        self.assertEqual(r["segments"], [])
+        self.assertEqual(r["id"], "rule-1")
+
+    def test_sequence_forms_and_symbols(self):
+        s = self.scheme([{"name": "a", "kind": "sequence", "bells": "4321"},
+                         {"name": "b", "kind": "sequence",
+                          "bells": [6, 5, 4, 3]},
+                         {"name": "c", "kind": "sequence",
+                          "bells": "0 E T", "position": "back"}], stage=12)
+        self.assertEqual([r["bells"] for r in s["rules"]],
+                         [(4, 3, 2, 1), (6, 5, 4, 3), (10, 11, 12)])
+        self.assertEqual([r["pattern"] for r in s["rules"]],
+                         ["4321", "6543", "0ET"])
+
+    def test_row_rule_must_be_a_permutation(self):
+        with self.assertRaises(SchemeError) as ctx:
+            self.scheme([{"name": "r", "kind": "row", "row": "123455"}])
+        err = ctx.exception
+        self.assertEqual(err.rule, 0)
+        self.assertEqual(err.field, "row")
+        self.assertEqual(err.token, "5")
+        self.assertEqual(err.offset, 5)
+
+    def test_errors_located_at_rule_index(self):
+        with self.assertRaises(SchemeError) as ctx:
+            self.scheme([{"name": "ok", "kind": "row", "row": "123456"},
+                         {"name": "bad", "kind": "run",
+                          "direction": "sideways"}])
+        self.assertEqual(ctx.exception.rule, 1)
+        self.assertEqual(ctx.exception.field, "direction")
+        with self.assertRaises(SchemeError) as ctx:
+            self.scheme([{"name": "ok", "kind": "row", "row": "123456"},
+                         {"name": "bad", "kind": "run", "min_length": 99}])
+        self.assertEqual((ctx.exception.rule, ctx.exception.field),
+                         (1, "min_length"))
+        with self.assertRaises(SchemeError) as ctx:
+            self.scheme([{"name": "bad", "kind": "sequence", "bells": "18"}])
+        self.assertEqual(ctx.exception.field, "bells")
+        self.assertEqual(ctx.exception.token, "8")
+        for rules in ([], [{"name": "x", "kind": "row", "row": "12345"}],):
+            with self.assertRaises((SchemeError, NotationError)):
+                self.scheme(rules)
+        with self.assertRaises(SchemeError):
+            self.scheme([{"name": "same", "kind": "row", "row": "123456"},
+                         {"name": "same", "kind": "run", "min_length": 3}])
+
+    def test_filter_validation(self):
+        with self.assertRaises(SchemeError) as ctx:
+            self.scheme([{"name": "r", "kind": "run", "min_length": 3,
+                          "strokes": ["treble"]}])
+        self.assertEqual(ctx.exception.field, "strokes")
+        with self.assertRaises(SchemeError) as ctx:
+            self.scheme([{"name": "r", "kind": "run", "min_length": 3,
+                          "lead_end": "half-lead"}])
+        self.assertEqual(ctx.exception.field, "lead_end")
+        with self.assertRaises(SchemeError) as ctx:
+            self.scheme([{"name": "r", "kind": "run", "min_length": 3,
+                          "segments": [1, 1]}])
+        self.assertEqual(ctx.exception.field, "segments")
+        with self.assertRaises(SchemeError):
+            self.scheme([{"name": "r", "kind": "run", "min_length": 3,
+                          "weight": 0}])
+
+    def test_stage_mismatch(self):
+        with self.assertRaises(SchemeError):
+            parse_scheme({"name": "s", "stage": 5,
+                          "rules": [{"name": "r", "kind": "row",
+                                     "row": "123456"}]})
+
+
+class RunMatchTests(unittest.TestCase):
+    def test_prefix_suffix_and_any(self):
+        from ringing import _match_run
+        front_up = self._rule("run", direction="up", position="front",
+                              min_length=4)
+        back_dn = self._rule("run", direction="down", position="back",
+                             min_length=4)
+        any_dn = self._rule("run", direction="down", position="any",
+                            min_length=4)
+        bells = tuple(range(6, 0, -1))  # 654321 (back rounds)
+        self.assertEqual(_match_run(bells, front_up), [])
+        self.assertEqual(_match_run(bells, back_dn),
+                         [{"direction": "down", "start": 0, "length": 6}])
+        self.assertEqual(_match_run(bells, any_dn),
+                         [{"direction": "down", "start": 0, "length": 6}])
+
+    @staticmethod
+    def _rule(kind, **kw):
+        base = {"id": "r", "name": "r", "kind": kind, "weight": 1,
+                "strokes": ["hand", "back"], "lead_end": "any",
+                "segments": []}
+        base.update(kw)
+        return base
+
+    def test_longest_run_only_per_direction_and_range(self):
+        from ringing import _match_run
+        # permutation on 8 bells: an up/down check on a row with two down
+        # runs - 8765 (length 4) at the front and 432 (length 3) later -
+        # keeps only the longest run for the same direction+range
+        row = (8, 7, 6, 5, 1, 4, 3, 2)
+        rule = self._rule("run", direction="down", position="any",
+                          min_length=3)
+        self.assertEqual(_match_run(row, rule),
+                         [{"direction": "down", "start": 0, "length": 4}])
+
+    def test_both_directions_can_both_hit(self):
+        from ringing import _match_run
+        # 234 up at front, 987 down at back: direction 'both' yields both
+        row = (2, 3, 4, 1, 5, 6, 9, 8, 7)
+        rule = self._rule("run", direction="both", position="any",
+                          min_length=3)
+        hits = _match_run(row, rule)
+        self.assertEqual(sorted((h["direction"], h["start"], h["length"])
+                                for h in hits),
+                         [("down", 6, 3), ("up", 0, 3)])
+
+    def test_sequence_and_row_matching(self):
+        from ringing import _match_sequence, _match_row
+        seq = self._rule("sequence", bells=(1, 3, 5), pattern="135",
+                         position="front")
+        self.assertEqual(_match_sequence((1, 3, 5, 2, 6, 4), seq),
+                         [{"start": 0, "length": 3}])
+        self.assertEqual(_match_sequence((6, 1, 3, 5, 2, 4), seq), [])
+        seq_any = dict(seq, position="any")
+        self.assertEqual(_match_sequence((6, 1, 3, 5, 2, 4), seq_any),
+                         [{"start": 1, "length": 3}])
+        seq_back = dict(seq, position="back")
+        self.assertEqual(_match_sequence((6, 2, 4, 1, 3, 5), seq_back),
+                         [{"start": 3, "length": 3}])
+        row_rule = self._rule("row", bells=(1, 2, 3, 4, 5, 6),
+                              pattern="123456")
+        self.assertEqual(_match_row((1, 2, 3, 4, 5, 6), row_rule),
+                         [{"start": 0, "length": 6}])
+        self.assertEqual(_match_row((1, 2, 3, 4, 6, 5), row_rule), [])
+
+
+class ScoreAnalysisTests(unittest.TestCase):
+    def setUp(self):
+        self.rep = analyze(6, PB_MINOR)
+        self.method = {"id": 7, "name": "Plain Bob Minor", "version": 1}
+
+    def score(self, rules, rep=None):
+        scheme = parse_scheme({"name": "s", "rules": rules}, stage=6)
+        return score_analysis(rep or self.rep, scheme, method=self.method)
+
+    def test_run_weight_and_run_length(self):
+        res = self.score([
+            {"name": "front up", "kind": "run", "direction": "up",
+             "position": "front", "min_length": 4, "weight": 2},
+            {"name": "rounds", "kind": "row", "row": "123456"},
+        ])
+        runs = [r for r in res["rules"] if r["kind"] == "run"][0]
+        # run score is weight * run length for every hit
+        self.assertEqual(runs["score"],
+                         sum(h["score"] for h in res["hits"]
+                             if h["kind"] == "run"))
+        self.assertTrue(all(h["score"] == 2 * h["length"]
+                            for h in res["hits"] if h["kind"] == "run"))
+        hit0 = next(h for h in res["hits"] if h["index"] == 0
+                    and h["kind"] == "run")
+        self.assertEqual((hit0["start"], hit0["length"], hit0["matched"],
+                          hit0["position"], hit0["direction"]),
+                         (1, 6, "123456", "front", "up"))
+        # hits carry rule/row/index/position plus method/lead/change context
+        self.assertEqual((hit0["rule"], hit0["row"], hit0["method_id"],
+                          hit0["method"], hit0["version"], hit0["segment"]),
+                         ("front up", "123456", 7, "Plain Bob Minor", 1, None))
+
+    def test_index0_is_handstroke(self):
+        self.assertEqual(stroke_for_index(0), "hand")
+        self.assertEqual(stroke_for_index(1), "back")
+        res = self.score([{"name": "r", "kind": "row", "row": "123456"}])
+        h0 = next(h for h in res["hits"] if h["index"] == 0)
+        self.assertEqual(h0["stroke"], "hand")
+        self.assertFalse(h0["lead_end"])
+
+    def test_stroke_filter(self):
+        hand = self.score([{"name": "r", "kind": "row", "row": "123456",
+                            "strokes": ["hand"]}])
+        back = self.score([{"name": "r", "kind": "row", "row": "123456",
+                            "strokes": ["back"]}])
+        # rounds appears at index 0 (hand) and 60 (hand, lead end)
+        self.assertEqual(hand["rules"][0]["hits"], 2)
+        self.assertEqual(back["rules"][0]["hits"], 0)
+        # unmatched rules keep zero values everywhere
+        self.assertEqual(back["rules"][0]["score"], 0)
+        self.assertEqual(back["rules"][0]["by_stroke"],
+                         {"hand": {"hits": 0, "score": 0},
+                          "back": {"hits": 0, "score": 0}})
+        self.assertEqual(back["rules"][0]["by_method"], [])
+
+    def test_lead_end_filter(self):
+        le = self.score([{"name": "r", "kind": "row", "row": "123456",
+                          "lead_end": "lead_end"}])
+        nle = self.score([{"name": "r", "kind": "row", "row": "123456",
+                           "lead_end": "not_lead_end"}])
+        # only the closing index 60 (change 12 == lead length) is a lead end
+        self.assertEqual([h["index"] for h in le["hits"]], [60])
+        self.assertEqual([h["index"] for h in nle["hits"]], [0])
+        self.assertTrue(all(h["lead_end"] for h in le["hits"]))
+        self.assertFalse(any(h["lead_end"] for h in nle["hits"]))
+
+    def test_aggregation_by_stroke_and_method(self):
+        res = self.score([{"name": "r", "kind": "row", "row": "123456"}])
+        (rule,) = res["rules"]
+        self.assertEqual(rule["by_stroke"]["hand"],
+                         {"hits": 2, "score": 2})
+        self.assertEqual(rule["by_stroke"]["back"],
+                         {"hits": 0, "score": 0})
+        self.assertEqual(rule["by_method"],
+                         [{"method_id": 7, "name": "Plain Bob Minor",
+                           "version": 1, "hits": 2, "score": 2}])
+        self.assertIsNone(rule["by_segment"])  # analyses have no segments
+
+    def test_segment_rule_scores_zero_on_an_analysis(self):
+        res = self.score([{"name": "r", "kind": "run", "direction": "both",
+                           "position": "any", "min_length": 3,
+                           "segments": [1]}])
+        self.assertEqual(res["total_hits"], 0)
+        self.assertEqual(res["rules"][0]["hits"], 0)
+
+    def test_capped_report_is_partial_checked_rows_only(self):
+        capped = analyze(6, PB_MINOR, max_rows=12)  # one lead only
+        full = self.rep
+        rules = [{"name": "r", "kind": "run", "direction": "both",
+                  "position": "any", "min_length": 4}]
+        p = self.score(rules, rep=capped)
+        f = self.score(rules, rep=full)
+        self.assertTrue(p["partial"])
+        self.assertTrue(p["truncated"])
+        self.assertEqual(p["rows_analyzed"], 13)
+        self.assertEqual(p["checked_rows"], 12)
+        self.assertFalse(p["truth"]["conclusive"])
+        self.assertIsNone(p["truth"]["true"])
+        self.assertLess(p["total_score"], f["total_score"])
+        # the partial result must not be presented as a full-extent score
+        self.assertIn("truth_inconclusive", p["problems"])
+
+
+class ScoreTouchTests(unittest.TestCase):
+    def setUp(self):
+        self.touch = analyze_spliced([
+            _seg(1, PB_MINOR, 2, name="PB"),
+            _seg(2, PB_MINOR_14, 2, name="PB14"),
+            _seg(1, PB_MINOR, 1, name="PB")])
+
+    def score(self, rules):
+        scheme = parse_scheme({"name": "s", "rules": rules}, stage=6)
+        return score_touch(self.touch, scheme)
+
+    def test_hit_context_and_segment_aggregation(self):
+        res = self.score([{"name": "r", "kind": "run", "direction": "both",
+                           "position": "any", "min_length": 4}])
+        (rule,) = res["rules"]
+        self.assertFalse(res["partial"])
+        # segments include the starting row (segment 0, no method)
+        seg_hits = {b["segment"]: b["hits"] for b in rule["by_segment"]}
+        self.assertIn(0, seg_hits)
+        methods = {b["method_id"]: b["hits"] for b in rule["by_method"]}
+        self.assertIn(None, methods)  # index-0 row has no method
+        self.assertTrue(set(methods) >= {1, 2})
+        h_seg2 = next(h for h in res["hits"] if h["segment"] == 2)
+        self.assertEqual((h_seg2["method_id"], h_seg2["version"]), (2, 1))
+        self.assertEqual(h_seg2["method"], "PB14")
+        # segment 2 starts after 24 rows (2 leads * 12): its lead/change
+        # follow from the position inside the segment
+        offset = h_seg2["index"] - 24
+        self.assertEqual((h_seg2["lead"], h_seg2["change"]),
+                         ((offset - 1) // 12 + 1, (offset - 1) % 12 + 1))
+
+    def test_segment_filter(self):
+        res = self.score([{"name": "r", "kind": "run", "direction": "both",
+                           "position": "any", "min_length": 4,
+                           "segments": [2]}])
+        (rule,) = res["rules"]
+        self.assertTrue(res["hits"])
+        self.assertTrue(all(h["segment"] == 2 for h in res["hits"]))
+        self.assertEqual(rule["hits"],
+                         sum(1 for h in res["hits"] if h["segment"] == 2))
+        self.assertEqual({b["segment"] for b in rule["by_segment"]}, {2})
+
+    def test_stroke_alternation_across_segments(self):
+        res = self.score([{"name": "r", "kind": "run", "direction": "both",
+                           "position": "any", "min_length": 4}])
+        for h in res["hits"]:
+            self.assertEqual(h["stroke"],
+                             "hand" if h["index"] % 2 == 0 else "back")
+
+
+class CompareMusicTests(unittest.TestCase):
+    def setUp(self):
+        self.scheme = {"id": 1, "name": "s", "version": 1}
+        rules = [{"id": "r1", "name": "rounds", "kind": "row",
+                  "hits": 2, "score": 2}]
+        self.a = self._result(1, stage=6, scheme=self.scheme, hits=2, score=2,
+                              rules=rules)
+        self.b = self._result(2, stage=6, scheme=self.scheme, hits=5, score=9,
+                              rules=[{"id": "r1", "name": "rounds",
+                                      "kind": "row", "hits": 5, "score": 9}])
+
+    @staticmethod
+    def _result(i, stage, scheme, hits, score, rules, partial=False,
+                checked=60, kind="analysis", version="1.0"):
+        return {"id": i, "kind": kind, "scoring_version": version,
+                "stage": stage, "scheme": scheme, "partial": partial,
+                "checked_rows": checked, "total_hits": hits,
+                "total_score": score, "rules": rules}
+
+    def test_comparable_per_rule_deltas(self):
+        cmp = compare_music(self.a, self.b)
+        self.assertTrue(cmp["comparable"])
+        self.assertEqual(cmp["total_hits_delta"], 3)
+        self.assertEqual(cmp["total_score_delta"], 7)
+        (r,) = cmp["rules"]
+        self.assertEqual((r["hits_delta"], r["score_delta"]), (3, 7))
+        self.assertEqual((r["a"]["hits"], r["b"]["score"]), (2, 9))
+
+    def test_missing_rule_keeps_zero(self):
+        b = self._result(2, 6, self.scheme, 1, 4,
+                         [{"id": "r2", "name": "other", "kind": "run",
+                           "hits": 1, "score": 4}])
+        cmp = compare_music(self.a, b)
+        self.assertTrue(cmp["comparable"])
+        self.assertFalse(cmp["rules_same"])
+        by_id = {r["id"]: r for r in cmp["rules"]}
+        self.assertEqual((by_id["r1"]["present_a"], by_id["r1"]["present_b"],
+                          by_id["r1"]["b"]["score"]), (True, False, 0))
+        self.assertEqual(by_id["r2"]["a"]["hits"], 0)
+
+    def test_incomparable_stage_and_scheme(self):
+        other_stage = self._result(3, 5, self.scheme, 1, 1, [])
+        self.assertEqual(compare_music(self.a, other_stage)["reasons"],
+                         ["stage"])
+        other_scheme = self._result(4, 6, {"id": 9, "name": "x", "version": 1},
+                                    1, 1, [])
+        self.assertEqual(compare_music(self.a, other_scheme)["reasons"],
+                         ["scheme"])
+        v2 = self._result(5, 6, {"id": 1, "name": "s", "version": 2}, 1, 1, [])
+        self.assertEqual(compare_music(self.a, v2)["reasons"],
+                         ["scheme_version"])
+        # same name+version through different stored ids stays comparable
+        alias = self._result(6, 6, {"id": 99, "name": "s", "version": 1},
+                             1, 1, [])
+        self.assertTrue(compare_music(self.a, alias)["comparable"])
+
+    def test_partial_flags_carried(self):
+        partial = self._result(7, 6, self.scheme, 1, 1, [], partial=True,
+                               checked=12)
+        cmp = compare_music(self.a, partial)
+        self.assertFalse(cmp["partial_a"])
+        self.assertTrue(cmp["partial_b"])
+        self.assertEqual((cmp["checked_rows_a"], cmp["checked_rows_b"]),
+                         (60, 12))
+
+
 class ApiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -1138,6 +1506,319 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(idx["max_stage"], 12)
         self.assertEqual(idx["hard_max_rows"], HARD_MAX_ROWS)
         self.assertEqual(idx["bell_symbols"], {"10": "0", "11": "E", "12": "T"})
+
+    def test_13_scheme_and_music_flow(self):
+        # a method version + its plain-course analysis
+        status, m = self.call("POST", "/api/methods",
+                              {"name": "Music PB Minor", "stage": 6,
+                               "notation": PB_MINOR})
+        status, a = self.call("POST", "/api/analyses", {"method_id": m["id"]})
+        # a scoring scheme: weighted runs, a sequence and a whole row
+        scheme_body = {"name": "minor-music", "stage": 6, "rules": [
+            {"id": "front-up", "name": "front run up >=4", "kind": "run",
+             "direction": "up", "position": "front", "min_length": 4,
+             "weight": 2},
+            {"id": "back-down", "name": "back run down >=4", "kind": "run",
+             "direction": "down", "position": "back", "min_length": 4},
+            {"id": "queens", "name": "135 at front", "kind": "sequence",
+             "bells": "135", "position": "front"},
+            {"id": "rounds", "name": "rounds handstroke", "kind": "row",
+             "row": "123456", "strokes": ["hand"]}]}
+        status, s = self.call("POST", "/api/schemes", scheme_body)
+        self.assertEqual(status, 201)
+        self.assertEqual(s["version"], 1)
+        self.assertEqual(s["scoring_version"], "1.0")
+        self.assertEqual(s["rule_count"], 4)
+        # re-posting under the same name creates version 2
+        status, s2 = self.call("POST", "/api/schemes",
+                               {"name": "minor-music", "stage": 6,
+                                "rules": scheme_body["rules"][:1]})
+        self.assertEqual(s2["version"], 2)
+        status, lst = self.call("GET", "/api/schemes")
+        self.assertEqual([x["version"] for x in lst["schemes"]
+                          if x["name"] == "minor-music"], [1, 2])
+        status, detail = self.call("GET", f"/api/schemes/{s['id']}")
+        self.assertEqual(detail["rules"][0]["min_length"], 4)
+        self.assertEqual(detail["rules"][2]["bells"], "135")
+        # score the plain course
+        status, mu = self.call("POST", "/api/music",
+                               {"analysis_id": a["id"], "scheme_id": s["id"]})
+        self.assertEqual(status, 201)
+        self.assertFalse(mu["partial"])
+        self.assertEqual(mu["rows_analyzed"], 61)
+        self.assertEqual(mu["checked_rows"], 60)
+        self.assertEqual(mu["scheme"]["id"], s["id"])
+        self.assertTrue(mu["total_hits"] >= 1)
+        by_id = {r["id"]: r for r in mu["rule_scores"]}
+        # rounds at index 0 and 60 are both handstroke
+        self.assertEqual(by_id["rounds"]["hits"], 2)
+        # full result keeps every rule with zero values preserved
+        status, full = self.call("GET", f"/api/music/{mu['id']}")
+        self.assertEqual(len(full["result"]["rules"]), 4)
+        self.assertEqual(full["result"]["index0_stroke"], "hand")
+        self.assertEqual(full["result"]["strokes"], ["hand", "back"])
+        self.assertEqual(full["scheme"]["name"], "minor-music")
+
+        # hit filtering: rule, stroke, lead end, kind and an index slice
+        status, hits = self.call(
+            "GET", f"/api/music/{mu['id']}/hits?rule_id=rounds")
+        self.assertTrue(all(h["rule_id"] == "rounds" for h in hits["hits"]))
+        status, hits = self.call(
+            "GET", f"/api/music/{mu['id']}/hits?stroke=hand")
+        self.assertTrue(all(h["stroke"] == "hand" for h in hits["hits"]))
+        status, hits = self.call(
+            "GET", f"/api/music/{mu['id']}/hits?lead_end=true")
+        self.assertTrue(all(h["lead_end"] for h in hits["hits"]))
+        self.assertIn(60, [h["index"] for h in hits["hits"]])
+        status, hits = self.call(
+            "GET", f"/api/music/{mu['id']}/hits?kind=run&from=0&to=6")
+        self.assertTrue(all(h["kind"] == "run" and h["index"] <= 6
+                            for h in hits["hits"]))
+        status, out = self.call(
+            "GET", f"/api/music/{mu['id']}/hits?stroke=bob", expect=400)
+        self.assertEqual(out["code"], "bad_field")
+
+        # download: attachment with the full scheme rules embedded
+        req = urllib.request.Request(
+            self.base + f"/api/music/{mu['id']}/download")
+        with urllib.request.urlopen(req) as resp:
+            self.assertEqual(resp.status, 200)
+            self.assertIn("attachment", resp.headers["Content-Disposition"])
+            payload = json.loads(resp.read().decode())
+        self.assertEqual(payload["scheme"]["rule_count"], 4)
+        self.assertEqual(payload["result"]["total_score"],
+                         mu["total_score"])
+
+    def test_14_music_partial_under_cap_and_compare(self):
+        status, m = self.call("POST", "/api/methods",
+                              {"name": "Music Cap PB", "stage": 6,
+                               "notation": PB_MINOR})
+        # one-lead cap: partial score over the checked rows only
+        status, cap = self.call("POST", "/api/analyses",
+                                {"method_id": m["id"], "max_rows": 12})
+        status, full_a = self.call("POST", "/api/analyses",
+                                   {"method_id": m["id"]})
+        status, s = self.call("POST", "/api/schemes",
+                              {"name": "cap-music", "stage": 6, "rules": [
+                                  {"name": "r", "kind": "run",
+                                   "direction": "both", "position": "any",
+                                   "min_length": 4}]})
+        status, mu_full = self.call("POST", "/api/music",
+                                    {"analysis_id": full_a["id"],
+                                     "scheme_id": s["id"]})
+        status, mu_cap = self.call("POST", "/api/music",
+                                   {"analysis_id": cap["id"],
+                                    "scheme_id": s["id"]})
+        self.assertTrue(mu_cap["partial"])
+        self.assertEqual(mu_cap["checked_rows"], 12)
+        self.assertLess(mu_cap["total_score"], mu_full["total_score"])
+        # comparable: same stage, same scheme version; per-rule deltas listed
+        status, cmp = self.call(
+            "GET", f"/api/music/compare?a={mu_full['id']}&b={mu_cap['id']}")
+        self.assertEqual(status, 200)
+        c = cmp["comparison"]
+        self.assertTrue(c["comparable"])
+        self.assertTrue(c["partial_b"])
+        self.assertEqual(c["checked_rows_b"], 12)
+        self.assertLess(c["total_score_delta"], 0)
+        self.assertEqual(len(c["rules"]), 1)
+        self.assertLess(c["rules"][0]["hits_delta"], 0)
+
+        # scheme v2 under the same name makes the results incomparable
+        status, s2 = self.call("POST", "/api/schemes",
+                               {"name": "cap-music", "stage": 6, "rules": [
+                                   {"name": "r", "kind": "run",
+                                    "direction": "up", "position": "front",
+                                    "min_length": 3}]})
+        status, mu_v2 = self.call("POST", "/api/music",
+                                  {"analysis_id": full_a["id"],
+                                   "scheme_id": s2["id"]})
+        status, out = self.call(
+            "GET", f"/api/music/compare?a={mu_full['id']}&b={mu_v2['id']}",
+            expect=400)
+        self.assertEqual(out["code"], "incomparable")
+        self.assertEqual(out["reasons"], ["scheme_version"])
+        # cross-stage comparisons are refused too
+        status, gd = self.call("POST", "/api/methods",
+                               {"name": "Music GD", "stage": 5,
+                                "notation": "3.1.5.1.5.1.5.1.5.125"})
+        status, a5 = self.call("POST", "/api/analyses",
+                               {"method_id": gd["id"]})
+        status, s5 = self.call("POST", "/api/schemes",
+                               {"name": "five", "stage": 5, "rules": [
+                                   {"name": "r", "kind": "row",
+                                    "row": "12345"}]})
+        status, mu5 = self.call("POST", "/api/music",
+                                {"analysis_id": a5["id"],
+                                 "scheme_id": s5["id"]})
+        status, out = self.call(
+            "GET", f"/api/music/compare?a={mu_full['id']}&b={mu5['id']}",
+            expect=400)
+        self.assertIn("stage", out["reasons"])
+
+    def test_15_touch_music_with_segments(self):
+        status, m1 = self.call("POST", "/api/methods",
+                               {"name": "Music Touch PB", "stage": 6,
+                                "notation": PB_MINOR})
+        status, m2 = self.call("POST", "/api/methods",
+                               {"name": "Music Touch PB14", "stage": 6,
+                                "notation": PB_MINOR_14})
+        status, t = self.call("POST", "/api/touches", {"segments": [
+            {"method_id": m1["id"], "leads": 2},
+            {"method_id": m2["id"], "leads": 2},
+            {"method_id": m1["id"], "leads": 1}]})
+        status, s = self.call("POST", "/api/schemes",
+                              {"name": "touch-music", "stage": 6, "rules": [
+                                  {"id": "runs", "name": "four-runs",
+                                   "kind": "run", "direction": "both",
+                                   "position": "any", "min_length": 4},
+                                  {"id": "seg2", "name": "segment 2 only",
+                                   "kind": "run", "direction": "both",
+                                   "position": "any", "min_length": 4,
+                                   "segments": [2]}]})
+        status, mu = self.call("POST", "/api/music",
+                               {"touch_id": t["id"], "scheme_id": s["id"]})
+        self.assertEqual(status, 201)
+        self.assertEqual(mu["kind"], "touch")
+        self.assertFalse(mu["partial"])
+        status, full = self.call("GET", f"/api/music/{mu['id']}")
+        rules = {r["id"]: r for r in full["result"]["rules"]}
+        self.assertTrue(rules["seg2"]["hits"] <= rules["runs"]["hits"])
+        self.assertTrue(all(b["segment"] == 2
+                            for b in rules["seg2"]["by_segment"]))
+        # method aggregation spans the two method versions
+        method_ids = {b["method_id"] for b in rules["runs"]["by_method"]}
+        self.assertTrue(method_ids & {m1["id"], m2["id"]})
+        # hit endpoint segment filter
+        status, hits = self.call(
+            "GET", f"/api/music/{mu['id']}/hits?segment=2&rule_id=seg2")
+        self.assertTrue(hits["hits"])
+        self.assertTrue(all(h["segment"] == 2 and h["rule_id"] == "seg2"
+                            for h in hits["hits"]))
+        # listing with filters
+        status, lst = self.call("GET", "/api/music?kind=touch")
+        self.assertTrue(all(x["kind"] == "touch"
+                            for x in lst["music_analyses"]))
+        status, lst = self.call("GET", f"/api/music?scheme_id={s['id']}")
+        self.assertTrue(all(x["scheme_id"] == s["id"]
+                            for x in lst["music_analyses"]))
+
+    def test_16_music_errors(self):
+        # bad rule located by rule index/field
+        status, out = self.call("POST", "/api/schemes",
+                                {"name": "bad", "stage": 6, "rules": [
+                                    {"name": "ok", "kind": "row",
+                                     "row": "123456"},
+                                    {"name": "x", "kind": "run",
+                                     "direction": "sideways"}]}, expect=400)
+        self.assertEqual(out["code"], "bad_rule")
+        self.assertEqual((out["rule"], out["field"]), (1, "direction"))
+        # row permutation error keeps token/offset plus the rule index
+        status, out = self.call("POST", "/api/schemes",
+                                {"name": "bad2", "stage": 6, "rules": [
+                                    {"name": "r", "kind": "row",
+                                     "row": "123455"}]}, expect=400)
+        self.assertEqual(out["code"], "bad_rule")
+        self.assertEqual((out["rule"], out["token"], out["offset"]),
+                         (0, "5", 5))
+        status, out = self.call("POST", "/api/schemes",
+                                {"name": "", "stage": 6, "rules": [
+                                    {"name": "r", "kind": "row",
+                                     "row": "123456"}]}, expect=400)
+        self.assertEqual(out["code"], "bad_field")
+        # unknown scheme / analysis
+        status, out = self.call("POST", "/api/music",
+                                {"analysis_id": 1, "scheme_id": 999999},
+                                expect=404)
+        self.assertEqual(out["code"], "not_found")
+        status, out = self.call("POST", "/api/music",
+                                {"analysis_id": 999999, "scheme_id": 1},
+                                expect=404)
+        # must provide exactly one subject
+        status, out = self.call("POST", "/api/music", {"scheme_id": 1},
+                                expect=400)
+        self.assertEqual(out["code"], "missing_field")
+        # stage mismatch between scheme and subject
+        status, m = self.call("POST", "/api/methods",
+                              {"name": "Music Mismatch", "stage": 6,
+                               "notation": PB_MINOR})
+        status, a = self.call("POST", "/api/analyses", {"method_id": m["id"]})
+        status, s5 = self.call("POST", "/api/schemes",
+                               {"name": "five-mis", "stage": 5, "rules": [
+                                   {"name": "r", "kind": "row",
+                                    "row": "12345"}]})
+        status, out = self.call("POST", "/api/music",
+                                {"analysis_id": a["id"],
+                                 "scheme_id": s5["id"]}, expect=400)
+        self.assertEqual(out["code"], "bad_rule")
+        # unknown resources on reads
+        status, out = self.call("GET", "/api/schemes/9999", expect=404)
+        status, out = self.call("GET", "/api/music/9999", expect=404)
+        status, out = self.call("GET", "/api/music/9999/hits", expect=404)
+        status, out = self.call("GET", "/api/music/compare", expect=400)
+        # non-object bodies and non-integer ids are 400, never 500
+        status, out = self.call("POST", "/api/schemes", [1, 2], expect=400)
+        self.assertEqual(out["code"], "bad_field")
+        status, out = self.call("POST", "/api/music", [], expect=400)
+        self.assertEqual(out["code"], "bad_field")
+        status, out = self.call("POST", "/api/music",
+                                {"analysis_id": a["id"], "scheme_id": "x"},
+                                expect=400)
+        self.assertEqual(out["code"], "bad_field")
+        status, out = self.call("GET", "/api/music?kind=bogus", expect=400)
+        self.assertEqual(out["code"], "bad_field")
+
+    def test_18_scheme_stage_inherited_from_reference(self):
+        status, m = self.call("POST", "/api/methods",
+                              {"name": "Inherit PB", "stage": 6,
+                               "notation": PB_MINOR})
+        status, a = self.call("POST", "/api/analyses", {"method_id": m["id"]})
+        # no stage in the body: it is taken from the referenced analysis
+        status, s = self.call("POST", "/api/schemes",
+                              {"name": "inherited", "analysis_id": a["id"],
+                               "rules": [{"name": "r", "kind": "row",
+                                          "row": "123456"}]})
+        self.assertEqual(status, 201)
+        self.assertEqual(s["stage"], 6)
+        # an unknown reference is a 404 located before scheme validation
+        status, out = self.call("POST", "/api/schemes",
+                                {"name": "inherited-x",
+                                 "analysis_id": 999999,
+                                 "rules": [{"name": "r", "kind": "row",
+                                            "row": "123456"}]}, expect=404)
+        self.assertEqual(out["code"], "not_found")
+
+    def test_17_royal_music_symbols(self):
+        # 10 bells: bell 10 is '0' in rules, rows and hits
+        status, m10 = self.call("POST", "/api/methods",
+                                {"name": "Music Royal", "stage": 10,
+                                 "notation": PB_ROYAL,
+                                 "start_row": ROUNDS_10})
+        status, a10 = self.call("POST", "/api/analyses",
+                                {"method_id": m10["id"], "max_rows": 100000})
+        status, s10 = self.call("POST", "/api/schemes",
+                                {"name": "royal-music", "stage": 10,
+                                 "rules": [
+                                     {"name": "lead head", "kind": "row",
+                                      "row": "1352749608"},
+                                     {"name": "0-front sequence",
+                                      "kind": "sequence", "bells": [10, 8],
+                                      "position": "back"}]})
+        status, mu = self.call("POST", "/api/music",
+                               {"analysis_id": a10["id"],
+                                "scheme_id": s10["id"]})
+        self.assertEqual(status, 201)
+        by_name = {r["name"]: r for r in mu["rule_scores"]}
+        self.assertGreaterEqual(by_name["lead head"]["hits"], 1)
+        status, hits = self.call(
+            "GET", f"/api/music/{mu['id']}/hits?rule_id=rule-1")
+        self.assertTrue(any("0" in h["row"] for h in hits["hits"]))
+        # T (bell 12) is out of range on 10 bells and located
+        status, out = self.call("POST", "/api/schemes",
+                                {"name": "royal-bad", "stage": 10, "rules": [
+                                    {"name": "s", "kind": "sequence",
+                                     "bells": "0T"}]}, expect=400)
+        self.assertEqual((out["token"], out["offset"]), ("T", 1))
 
 
 if __name__ == "__main__":

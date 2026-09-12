@@ -1,6 +1,8 @@
 __pycache__/
 *.db
 analysis-*.json
+touch-*.json
+music-*.json
 !analysis-1.json
 !analysis-royal-10.json
 !analysis-maximus-12.json

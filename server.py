@@ -17,8 +17,11 @@ from urllib.parse import urlparse, parse_qs
 
 from db import Store
 from ringing import (HARD_MAX_ROWS, LimitRequiredError, NotationError,
-                     SplicedError, analyze, analyze_spliced, compare_reports,
-                     compare_touch_reports, parse_notation, parse_row, row_str)
+                     SchemeError, SplicedError, analyze, analyze_spliced,
+                     compact_bells, compare_music, compare_reports,
+                     compare_touch_reports, parse_notation, parse_row,
+                     parse_scheme, row_str, rule_to_dict, score_analysis,
+                     score_touch, SCORING_VERSION)
 
 DOCS_HTML = """<!doctype html>
 <html lang="zh">
@@ -98,6 +101,46 @@ offset（字符串为字符偏移，数组为元素下标）。</p>
 <li>组合（composition）：分析时可用 <code>overrides</code> 在指定 lead 的某一变以 notation 覆盖（如 bob/single），报告保留覆盖点前后轨迹。</li>
 </ul>
 
+<h2>音乐性评分（music scoring）</h2>
+<p>方案（scheme）是一套<strong>带权规则</strong>，对已存储的 analysis 或 touch 的逐行 rows
+打分（<code>scoring_version</code> 随评分模型固定，当前 <code>1.0</code>）。规则三类：</p>
+<table>
+<tr><th>kind</th><th>字段</th><th>含义与计分</th></tr>
+<tr><td><code>run</code></td><td><code>direction</code>（<code>up</code>/<code>down</code>/<code>both</code>，缺省 both）、
+<code>position</code>（<code>front</code> 前排 / <code>back</code> 后排 / <code>any</code> 任意位置，缺省 any）、
+<code>min_length</code>（2..stage，缺省 4）、<code>weight</code>（缺省 1）</td>
+<td>连续升序/降序钟号 run。<strong>同一 row、同一方向、同一位置范围内只取最长的一段</strong>
+（并列取最靠前）；<code>direction:"both"</code> 可同时给出升、降各一次命中。每次命中计
+<code>weight × run 长度</code>。</td></tr>
+<tr><td><code>sequence</code></td><td><code>bells</code>（紧凑串 <code>"4321"</code>/<code>"90ET"</code>、分隔串或整数数组）、
+<code>position</code>（front/back/any）</td>
+<td>指定钟号序列在 row 中连续出现（row 是排列，至多一处）；每次命中计 <code>weight</code>。</td></tr>
+<tr><td><code>row</code></td><td><code>row</code>（必须是 1..stage 的完整排列，沿用 0/E/T）</td>
+<td>整行完全一致才命中；每次命中计 <code>weight</code>。</td></tr>
+</table>
+<ul>
+<li><strong>stroke 固定约定：index 0（起始行）永远是 handstroke（手绳）</strong>，此后随奇偶交替
+（偶 index = hand，奇 index = back）。可用 <code>strokes:["hand"]</code>/<code>["back"]</code>
+（缺省两者）限定；<code>lead_end</code> 取 <code>lead_end</code>/<code>not_lead_end</code>/<code>any</code>
+（缺省 any，lead end = 该行 change 等于 lead 长度）；<code>segments:[2]</code> 只在 touch 的指定
+1 起区段内计分（analysis 无区段，带该过滤的规则在 analysis 上保留零值）。</li>
+<li>每条命中记录 <code>rule_id/rule/kind</code>、<code>row</code>、<code>index</code>、<code>stroke</code>、
+<code>lead_end</code>、<code>position/start/length/matched</code>（start 为 1 起位置）与上下文
+<code>method_id/method/version</code>、<code>segment</code>、<code>lead</code>、<code>change</code> 及本次得分。</li>
+<li>按规则汇总 <code>hits/score</code>，并细分 <code>by_stroke</code>、<code>by_method</code>，
+touch 还有 <code>by_segment</code>；<strong>未命中规则保留零值</strong>，规则顺序即方案顺序。</li>
+<li><strong>max_rows 截断时只分析实际已生成的 rows</strong>：结果带 <code>partial:true</code>、
+<code>rows_analyzed</code>、<code>checked_rows</code> 与 truth 状态（<code>truth.true</code> 可为
+<code>null</code>），绝不能把局部得分当作全量结果；touch 总是完整展开（规模创建时已校验），
+故永不为 partial。</li>
+<li><strong>只比较同 stage、同方案（name）同方案版本（version）、同 scoring_version 的两个结果</strong>；
+否则 <code>GET /api/music/compare</code> 返回 400 <code>incomparable</code> 并列出失配项。
+可比较时逐条列出各规则双方 hits/score 及 <code>hits_delta/score_delta</code>（一方缺规则按零值），
+并给出总分增减与双方 partial/checked_rows。</li>
+<li>方案同名再次创建自动递增 <code>version</code>；规则错误按 <code>rule</code>（0 起）、<code>field</code>
+定位，row/sequence 的符号错误另带 <code>token</code>/<code>offset</code>，错误不落库。</li>
+</ul>
+
 <h2>Spliced touch（多方法拼接）</h2>
 <ul>
 <li>按区段（segment）编排：每段指定 <code>method_id</code>、lead 数（<code>leads</code>）与段内
@@ -136,6 +179,15 @@ change 覆盖（<code>overrides</code>，lead 从 1 起按段内计）。所有�
 <tr><td class="tag get">GET</td><td><code>/api/touches/{id}/rows?segment=2&amp;from=0&amp;to=60</code></td><td>逐行结果，可按区段过滤、按行号切片</td></tr>
 <tr><td class="tag get">GET</td><td><code>/api/touches/{id}/download</code></td><td>下载 touch 报告 JSON（attachment）</td></tr>
 <tr><td class="tag get">GET</td><td><code>/api/touches/compare?a=1&amp;b=2</code></td><td>比较两次 touch 的规模、闭合、truth 与首次重复位置；也支持 POST <code>{"a":1,"b":2}</code></td></tr>
+<tr><td class="tag post">POST</td><td><code>/api/schemes</code></td><td>创建音乐性评分<strong>方案版本</strong>（同名自动递增 version）。Body: <code>{"name":"minor-music","stage":6,"rules":[…]}</code>（stage 也可改传 <code>analysis_id</code>/<code>touch_id</code> 继承）</td></tr>
+<tr><td class="tag get">GET</td><td><code>/api/schemes?stage=6</code></td><td>列出方案版本（可按 stage 过滤）</td></tr>
+<tr><td class="tag get">GET</td><td><code>/api/schemes/{id}</code></td><td>方案详情（含规范化后的全部规则）</td></tr>
+<tr><td class="tag post">POST</td><td><code>/api/music</code></td><td>对一个已存 analysis 或 touch 打分。Body: <code>{"analysis_id":1,"scheme_id":1}</code>（二者二选一）</td></tr>
+<tr><td class="tag get">GET</td><td><code>/api/music?kind=&amp;subject_id=&amp;scheme_id=&amp;stage=</code></td><td>列出音乐分析结果（摘要 + 各规则得分）</td></tr>
+<tr><td class="tag get">GET</td><td><code>/api/music/{id}</code></td><td>完整音乐分析（规则汇总 + 全部命中）</td></tr>
+<tr><td class="tag get">GET</td><td><code>/api/music/{id}/hits?rule_id=&amp;kind=&amp;stroke=&amp;lead_end=&amp;segment=&amp;method_id=&amp;from=&amp;to=</code></td><td>命中筛选：按规则/类型/stroke/lead end/区段/方法与行号区间过滤</td></tr>
+<tr><td class="tag get">GET</td><td><code>/api/music/{id}/download</code></td><td>下载音乐分析 JSON（含完整方案规则，attachment）</td></tr>
+<tr><td class="tag get">GET</td><td><code>/api/music/compare?a=1&amp;b=2</code></td><td>比较两个音乐分析（须同 stage、同方案版本）；也支持 POST <code>{"a":1,"b":2}</code></td></tr>
 </table>
 
 <h2>示例</h2>
@@ -210,6 +262,50 @@ curl -s -X POST localhost:8000/api/methods -d '{"name":"X","stage":12,
   "notation":"x","start_row":" 1234567890EE"}'
 # -> {"code":"notation_error","token":"E","offset":12,"error":"bell 11 appears ..."}</pre>
 
+<h2>示例：音乐性评分</h2>
+<pre># 1) 创建评分方案（同名再发即新版本）：带权 run + 钟号序列 + 整 row
+curl -s -X POST localhost:8000/api/schemes -d '{
+  "name": "minor-music", "stage": 6, "rules": [
+    {"id": "front-up", "name": "front run up >=4", "kind": "run",
+     "direction": "up", "position": "front", "min_length": 4, "weight": 2},
+    {"id": "back-down", "name": "back run down >=4", "kind": "run",
+     "direction": "down", "position": "back", "min_length": 4},
+    {"id": "queens", "name": "135 at the front", "kind": "sequence",
+     "bells": "135", "position": "front"},
+    {"id": "rounds-hand", "name": "rounds (handstroke)", "kind": "row",
+     "row": "123456", "strokes": ["hand"]},
+    {"id": "le-music", "name": "lead-end runs", "kind": "run",
+     "direction": "both", "position": "any", "min_length": 4,
+     "lead_end": "lead_end", "weight": 3}
+  ]}'
+
+# 2) 对已存分析（id=1）打分；max_rows 截断的分析只计已检查 rows 并标 partial
+curl -s -X POST localhost:8000/api/music -d '{"analysis_id":1,"scheme_id":1}'
+
+# 3) 命中筛选：只看 handstroke 的 lead-end 命中 / 只看某规则的 run 命中
+curl -s 'localhost:8000/api/music/1/hits?stroke=hand&amp;lead_end=true'
+curl -s 'localhost:8000/api/music/1/hits?rule_id=front-up&amp;kind=run&amp;from=0&amp;to=24'
+
+# 4) 比较两个结果（必须同 stage、同方案版本）：各规则得分与命中增减
+curl -s 'localhost:8000/api/music/compare?a=1&amp;b=2'
+# 方案版本不同 -> 400 {"code":"incomparable","reasons":["scheme_version"]}
+
+# 5) touch 评分可按区段限定规则；命中可按 segment/method_id 过滤
+curl -s -X POST localhost:8000/api/schemes -d '{"name":"seg2","stage":6,"rules":[
+  {"name":"segment 2 runs","kind":"run","direction":"both","position":"any",
+   "min_length":4,"segments":[2]}]}'
+curl -s -X POST localhost:8000/api/music -d '{"touch_id":1,"scheme_id":2}'
+curl -s 'localhost:8000/api/music/3/hits?segment=2'
+
+# 6) 下载（内含完整方案规则，自包含）
+curl -sOJ localhost:8000/api/music/1/download</pre>
+<p>规则错误定位到 0 起的 <code>rule</code>（及 <code>field</code>），row/sequence 符号错误另带
+<code>token</code>/<code>offset</code>，不落库：</p>
+<pre>{"code":"bad_rule","error":"direction must be 'up', 'down' or 'both'",
+ "rule":1,"field":"direction"}
+{"code":"bad_rule","error":"bell 5 appears more than once in the row",
+ "rule":0,"field":"row","token":"5","offset":5}</pre>
+
 <p>更多说明见仓库 <code>README.md</code>；演示脚本：<code>python3 examples.py</code>。</p>
 </body>
 </html>
@@ -217,10 +313,12 @@ curl -s -X POST localhost:8000/api/methods -d '{"name":"X","stage":12,
 
 API_INDEX = {
     "name": "Change Ringing Method Validator API",
-    "version": "1.1",
+    "version": "1.2",
     "min_stage": 4,
     "max_stage": 12,
     "hard_max_rows": HARD_MAX_ROWS,
+    "scoring_version": SCORING_VERSION,
+    "index0_stroke": "hand",
     "bell_symbols": {"10": "0", "11": "E", "12": "T"},
     "docs": "/",
     "endpoints": [
@@ -240,6 +338,15 @@ API_INDEX = {
         "GET  /api/touches/{id}/rows?segment=&from=&to=",
         "GET  /api/touches/{id}/download",
         "GET  /api/touches/compare?a=&b=  (or POST)",
+        "POST /api/schemes",
+        "GET  /api/schemes?stage=",
+        "GET  /api/schemes/{id}",
+        "POST /api/music",
+        "GET  /api/music?kind=&subject_id=&scheme_id=&stage=",
+        "GET  /api/music/{id}",
+        "GET  /api/music/{id}/hits?rule_id=&kind=&stroke=&lead_end=&segment=&method_id=&from=&to=",
+        "GET  /api/music/{id}/download",
+        "GET  /api/music/compare?a=&b=  (or POST)",
     ],
 }
 
@@ -319,6 +426,124 @@ def _run_analysis(store, method_id, overrides=None, max_rows=None):
                      overrides=overrides, max_rows=max_rows)
     return store.create_analysis(method_id, overrides or [],
                                  report["max_rows"], report["status"], report)
+
+
+# --------------------------------------------------------------------- music
+def _scheme_json(rec, with_rules=True):
+    out = {k: rec[k] for k in
+           ("id", "name", "stage", "version", "created_at")}
+    out["scoring_version"] = SCORING_VERSION
+    out["rule_count"] = len(rec["rules"])
+    if with_rules:
+        out["rules"] = rec["rules"]
+    return out
+
+
+def _normalized_scheme(rec):
+    """Rebuild a parse_scheme() form (rule bells as tuples) from a record."""
+    rules = []
+    for rule in rec["rules"]:
+        norm = {k: rule[k] for k in
+                ("id", "name", "kind", "weight", "strokes",
+                 "lead_end", "segments")}
+        if rule["kind"] == "run":
+            norm.update({"direction": rule["direction"],
+                         "position": rule["position"],
+                         "min_length": rule["min_length"]})
+        elif rule["kind"] == "sequence":
+            # a sequence is only a contiguous bell fragment, not a full row
+            bells = compact_bells(rule["bells"], rec["stage"])
+            norm.update({"bells": bells, "pattern": rule["bells"],
+                         "position": rule["position"]})
+        else:
+            bells = parse_row(rule["row"], rec["stage"])
+            norm.update({"bells": bells, "pattern": rule["row"]})
+        rules.append(norm)
+    return {"id": rec["id"], "name": rec["name"], "stage": rec["stage"],
+            "version": rec["version"], "rules": rules}
+
+
+def _music_summary(rec):
+    res = rec["result"]
+    return {"id": rec["id"], "created_at": rec["created_at"],
+            "kind": rec["kind"], "stage": rec["stage"],
+            "subject_id": rec["subject_id"], "scheme_id": rec["scheme_id"],
+            "scheme": {"id": rec["scheme_id"],
+                       "version": rec["scheme_version"]},
+            "scheme_version": rec["scheme_version"],
+            "status": rec["status"], "partial": rec["partial"],
+            "rows_analyzed": res["rows_analyzed"],
+            "checked_rows": res["checked_rows"],
+            "total_hits": res["total_hits"],
+            "total_score": res["total_score"],
+            "truth": res["truth"],
+            "rule_scores": [{"id": r["id"], "name": r["name"],
+                             "kind": r["kind"], "hits": r["hits"],
+                             "score": r["score"]} for r in res["rules"]]}
+
+
+def _get_scheme_or_404(store, scheme_id):
+    scheme = store.get_scheme(scheme_id)
+    if scheme is None:
+        raise ApiError(404, f"scheme {scheme_id} not found", "not_found")
+    return scheme
+
+
+def _get_music_or_404(store, music_id):
+    rec = store.get_music_analysis(music_id)
+    if rec is None:
+        raise ApiError(404, f"music analysis {music_id} not found", "not_found")
+    return rec
+
+
+def _filtered_hits(hits, query):
+    """Filter stored hits: rule_id, kind, stroke, lead_end, segment, method,
+    plus a global row-index slice (from/to inclusive)."""
+    out = hits
+
+    def _one(name):
+        return query[name][0] if name in query else None
+
+    rule_id = _one("rule_id")
+    if rule_id is not None:
+        out = [h for h in out if str(h["rule_id"]) == rule_id]
+    kind = _one("kind")
+    if kind is not None:
+        out = [h for h in out if h["kind"] == kind]
+    stroke = _one("stroke")
+    if stroke is not None:
+        if stroke not in ("hand", "back"):
+            raise ApiError(400, "stroke must be 'hand' or 'back'", "bad_field")
+        out = [h for h in out if h["stroke"] == stroke]
+    lead_end = _one("lead_end")
+    if lead_end is not None:
+        wanted = {"1": True, "true": True, "0": False, "false": False}.get(
+            lead_end.lower())
+        if wanted is None:
+            raise ApiError(400, "lead_end must be true or false", "bad_field")
+        out = [h for h in out if h["lead_end"] is wanted]
+    segment = _one("segment")
+    if segment is not None:
+        try:
+            segment = int(segment)
+        except ValueError:
+            raise ApiError(400, "segment must be an integer", "bad_field")
+        out = [h for h in out if h["segment"] == segment]
+    method_id = _one("method_id")
+    if method_id is not None:
+        try:
+            method_id = int(method_id)
+        except ValueError:
+            raise ApiError(400, "method_id must be an integer", "bad_field")
+        out = [h for h in out if h["method_id"] == method_id]
+    try:
+        start = int(query["from"][0]) if "from" in query else 0
+        end = int(query["to"][0]) if "to" in query else None
+    except ValueError:
+        raise ApiError(400, "from/to must be integers", "bad_field")
+    out = [h for h in out if h["index"] >= start
+           and (end is None or h["index"] <= end)]
+    return out
 
 
 # --------------------------------------------------------------------- routes
@@ -610,6 +835,195 @@ def api_compare_touches(handler, query, body):
             "comparison": comparison}, 200
 
 
+# --------------------------------------------------------------- music routes
+def api_create_scheme(handler, query, body):
+    if not isinstance(body, dict):
+        raise ApiError(400, "request body must be a JSON object", "bad_field")
+    name = _require(body, "name")
+    if not isinstance(name, str) or not name.strip():
+        raise ApiError(400, "name must be a non-empty string", "bad_field")
+    rules = body.get("rules")
+    store = handler.server.store
+    # the scheme may carry its own stage, or inherit from a referenced report
+    stage = body.get("stage")
+    if stage is None:
+        if body.get("analysis_id"):
+            ref = _get_analysis_or_404(
+                store, _validate_id(body["analysis_id"], "analysis_id"))
+            stage = ref["report"]["stage"]
+        elif body.get("touch_id"):
+            ref = _get_touch_or_404(store,
+                                    _validate_id(body["touch_id"], "touch_id"))
+            stage = ref["report"]["stage"]
+    try:
+        parsed = parse_scheme({"name": name, "stage": stage, "rules": rules})
+    except SchemeError as err:
+        raise ApiError(400, err.message, "bad_rule",
+                       {k: v for k, v in err.to_dict().items()
+                        if k != "error" and v is not None})
+    except NotationError as err:
+        raise ApiError(400, err.message, "notation_error",
+                       {k: v for k, v in err.to_dict().items() if k != "error"})
+    stored_rules = [rule_to_dict(rule) for rule in parsed["rules"]]
+    rec = store.create_scheme(parsed["name"], parsed["stage"], stored_rules)
+    return _scheme_json(rec), 201
+
+
+def api_list_schemes(handler, query, body):
+    store = handler.server.store
+    stage = None
+    if "stage" in query:
+        try:
+            stage = int(query["stage"][0])
+        except ValueError:
+            raise ApiError(400, "stage must be an integer", "bad_field")
+    return {"schemes": [_scheme_json(s, with_rules=False)
+                        for s in store.list_schemes(stage)]}, 200
+
+
+def api_get_scheme(handler, query, body, scheme_id):
+    return _scheme_json(_get_scheme_or_404(handler.server.store, scheme_id)), 200
+
+
+def _validate_id(value, field):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ApiError(400, f"{field} must be an integer", "bad_field")
+
+
+def api_create_music(handler, query, body):
+    """Score one stored analysis OR one stored touch against a scheme version.
+
+    Body: {"analysis_id"|"touch_id", "scheme_id"}.  The stage must match the
+    scheme's stage; a report stopped by max_rows is scored over the rows
+    actually checked and returned as partial=true.
+    """
+    store = handler.server.store
+    if not isinstance(body, dict):
+        raise ApiError(400, "request body must be a JSON object", "bad_field")
+    analysis_id = body.get("analysis_id")
+    touch_id = body.get("touch_id")
+    if (analysis_id is None) == (touch_id is None):
+        raise ApiError(400,
+                       "provide exactly one of 'analysis_id' and 'touch_id'",
+                       "missing_field")
+    scheme_id = _validate_id(_require(body, "scheme_id"), "scheme_id")
+    scheme_rec = _get_scheme_or_404(store, scheme_id)
+    normalized = _normalized_scheme(scheme_rec)
+    if touch_id is None:
+        rec = _get_analysis_or_404(store, _validate_id(analysis_id, "analysis_id"))
+        method = _get_method_or_404(store, rec["method_id"])
+        result = score_analysis(
+            rec["report"], normalized,
+            method={"id": method["id"], "name": method["name"],
+                    "version": method["version"]})
+        subject_id = rec["id"]
+    else:
+        rec = _get_touch_or_404(store, _validate_id(touch_id, "touch_id"))
+        result = score_touch(rec["report"], normalized)
+        subject_id = rec["id"]
+    music = store.create_music_analysis(
+        result["kind"], result["stage"], subject_id, scheme_rec["id"],
+        scheme_rec["version"], result)
+    out = _music_summary(music)
+    out["links"] = {
+        "report": f"/api/music/{music['id']}",
+        "hits": f"/api/music/{music['id']}/hits",
+        "download": f"/api/music/{music['id']}/download",
+    }
+    return out, 201
+
+
+def api_list_music(handler, query, body):
+    store = handler.server.store
+
+    def _opt_int(name):
+        if name not in query:
+            return None
+        try:
+            return int(query[name][0])
+        except ValueError:
+            raise ApiError(400, f"{name} must be an integer", "bad_field")
+
+    kind = query["kind"][0] if "kind" in query else None
+    if kind is not None and kind not in ("analysis", "touch"):
+        raise ApiError(400, "kind must be 'analysis' or 'touch'", "bad_field")
+    recs = store.list_music_analyses(kind=kind,
+                                     subject_id=_opt_int("subject_id"),
+                                     scheme_id=_opt_int("scheme_id"),
+                                     stage=_opt_int("stage"))
+    return {"music_analyses": [_music_summary(r) for r in recs]}, 200
+
+
+def _music_full(rec, scheme_rec):
+    return {"id": rec["id"], "created_at": rec["created_at"],
+            "kind": rec["kind"], "stage": rec["stage"],
+            "subject_id": rec["subject_id"],
+            "scheme": _scheme_json(scheme_rec, with_rules=False),
+            "result": rec["result"]}
+
+
+def api_get_music(handler, query, body, music_id):
+    rec = _get_music_or_404(handler.server.store, music_id)
+    scheme_rec = _get_scheme_or_404(handler.server.store, rec["scheme_id"])
+    return _music_full(rec, scheme_rec), 200
+
+
+def api_music_hits(handler, query, body, music_id):
+    rec = _get_music_or_404(handler.server.store, music_id)
+    hits = _filtered_hits(rec["result"]["hits"], query)
+    return {"id": rec["id"], "kind": rec["kind"],
+            "total_hits": rec["result"]["total_hits"],
+            "matched": len(hits), "hits": hits}, 200
+
+
+def api_music_download(handler, query, body, music_id):
+    rec = _get_music_or_404(handler.server.store, music_id)
+    scheme_rec = _get_scheme_or_404(handler.server.store, rec["scheme_id"])
+    payload = _music_full(rec, scheme_rec)
+    # include the complete normalized scheme rules for a self-contained file
+    payload["scheme"] = _scheme_json(scheme_rec, with_rules=True)
+    return payload, 200, f"music-{rec['kind']}-{rec['id']}.json"
+
+
+def api_compare_music(handler, query, body):
+    store = handler.server.store
+
+    def _param(name):
+        for src in (body, query):
+            if isinstance(src, dict) and name in src:
+                value = src[name]
+                return value[0] if isinstance(value, list) else value
+        return None
+
+    a, b = _param("a"), _param("b")
+    if a is None or b is None:
+        raise ApiError(400, "provide music result ids a & b", "missing_field")
+    rec_a = _get_music_or_404(store, _validate_id(a, "a"))
+    rec_b = _get_music_or_404(store, _validate_id(b, "b"))
+    res_a, res_b = dict(rec_a["result"]), dict(rec_b["result"])
+    res_a["id"], res_b["id"] = rec_a["id"], rec_b["id"]
+    comparison = compare_music(res_a, res_b)
+    if not comparison["comparable"]:
+        # only same-stage, same scheme version results may be compared
+        raise ApiError(
+            400,
+            "music results are not comparable: " + ", ".join(comparison["reasons"]),
+            "incomparable", {"reasons": comparison["reasons"],
+                             "a": comparison["a"], "b": comparison["b"]})
+
+    def _side(rec):
+        return {"music_id": rec["id"], "kind": rec["kind"],
+                "stage": rec["stage"], "subject_id": rec["subject_id"],
+                "scheme_id": rec["scheme_id"],
+                "scheme_version": rec["scheme_version"],
+                "created_at": rec["created_at"]}
+
+    return {"a": _side(rec_a), "b": _side(rec_b),
+            "comparison": comparison}, 200
+
+
 ROUTES = [
     ("GET", re.compile(r"^/$"), lambda h, q, b: (DOCS_HTML, 200, None, "html")),
     ("GET", re.compile(r"^/api$"), lambda h, q, b: (API_INDEX, 200)),
@@ -638,11 +1052,25 @@ ROUTES = [
      lambda h, q, b, tid: api_touch_rows(h, q, b, int(tid))),
     ("GET", re.compile(r"^/api/touches/(\d+)/download$"),
      lambda h, q, b, tid: api_touch_download(h, q, b, int(tid))),
+    ("POST", re.compile(r"^/api/schemes$"), api_create_scheme),
+    ("GET", re.compile(r"^/api/schemes$"), api_list_schemes),
+    ("GET", re.compile(r"^/api/schemes/(\d+)$"),
+     lambda h, q, b, sid: api_get_scheme(h, q, b, int(sid))),
+    ("POST", re.compile(r"^/api/music$"), api_create_music),
+    ("GET", re.compile(r"^/api/music$"), api_list_music),
+    ("GET", re.compile(r"^/api/music/compare$"), api_compare_music),
+    ("POST", re.compile(r"^/api/music/compare$"), api_compare_music),
+    ("GET", re.compile(r"^/api/music/(\d+)$"),
+     lambda h, q, b, mid: api_get_music(h, q, b, int(mid))),
+    ("GET", re.compile(r"^/api/music/(\d+)/hits$"),
+     lambda h, q, b, mid: api_music_hits(h, q, b, int(mid))),
+    ("GET", re.compile(r"^/api/music/(\d+)/download$"),
+     lambda h, q, b, mid: api_music_download(h, q, b, int(mid))),
 ]
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "RingingAPI/1.1"
+    server_version = "RingingAPI/1.2"
     protocol_version = "HTTP/1.1"
 
     def do_GET(self):
@@ -677,6 +1105,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"code": "notation_error", **err.to_dict()}, 400)
         except LimitRequiredError as err:
             self._send_json({"code": "limit_required", **err.to_dict()}, 400)
+        except SchemeError as err:
+            self._send_json({"code": "bad_rule", **err.to_dict()}, 400)
         except ValueError as err:
             self._send_json({"error": str(err), "code": "bad_request"}, 400)
         except BrokenPipeError:

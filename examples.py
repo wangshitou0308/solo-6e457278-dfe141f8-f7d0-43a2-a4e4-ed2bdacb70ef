@@ -217,6 +217,101 @@ def main():
     for sw in full["report"]["switches"]:
         print(f"  row {sw['at_index']}: {sw['before_row']} -> {sw['after_row']}")
 
+    # 18. musicality scoring: a weighted scheme version for the 6-bell
+    #     analyses created above (runs, a bell sequence and a whole row)
+    scheme = call("POST", "/api/schemes", {
+        "name": "minor-music", "stage": 6, "rules": [
+            {"id": "front-up", "name": "front run up >=4", "kind": "run",
+             "direction": "up", "position": "front", "min_length": 4,
+             "weight": 2},
+            {"id": "back-down", "name": "back run down >=4", "kind": "run",
+             "direction": "down", "position": "back", "min_length": 4},
+            {"id": "queens", "name": "135 at the front", "kind": "sequence",
+             "bells": "135", "position": "front"},
+            {"id": "rounds-hand", "name": "rounds (handstroke)", "kind": "row",
+             "row": "123456", "strokes": ["hand"]},
+            {"id": "le-runs", "name": "lead-end runs", "kind": "run",
+             "direction": "both", "position": "any", "min_length": 4,
+             "lead_end": "lead_end", "weight": 3}]})
+    show("scheme version (same name posted again bumps 'version')", scheme,
+         ["id", "name", "version", "rule_count", "scoring_version"])
+    # score the plain-course analysis (row index 0 is always handstroke)
+    mu = call("POST", "/api/music",
+              {"analysis_id": a1["id"], "scheme_id": scheme["id"]})
+    print("\n=== music: Plain Bob Minor plain course ===")
+    print(f"  total {mu['total_hits']} hits, score {mu['total_score']}, "
+          f"partial={mu['partial']}, checked_rows={mu['checked_rows']}")
+    for r in mu["rule_scores"]:
+        print(f"  {r['name']:<26} {r['hits']:>2} hits  {r['score']:>3} pts")
+    full = call("GET", f"/api/music/{mu['id']}")
+    print("  handstroke lead-end hits:")
+    for h in full["result"]["hits"]:
+        if h["stroke"] == "hand" and h["lead_end"]:
+            print(f"    row {h['index']:>2} ({h['rule']}) {h['row']} "
+                  f"matched {h['matched']} +{h['score']}")
+
+    # 19. capped analysis -> partial score over the checked rows only
+    acap = call("POST", "/api/music",
+                {"analysis_id": a2["id"], "scheme_id": scheme["id"]})
+    show("music of the bob analysis (may be partial under a row cap)", acap,
+         ["partial", "rows_analyzed", "checked_rows", "total_hits",
+          "total_score", "truth"])
+
+    # 20. hit filtering: one rule / one stroke / an index slice
+    hits = call("GET", f"/api/music/{mu['id']}/hits"
+                       "?rule_id=front-up&stroke=back")
+    print("\n=== backstroke front-up run hits ===")
+    for h in hits["hits"]:
+        print(f"  row {h['index']:>2} {h['row']} run={h['matched']} "
+              f"lead {h['lead']} change {h['change']} +{h['score']}")
+
+    # 21. compare two music results (same stage, same scheme version)
+    cmp = call("GET", f"/api/music/compare?a={mu['id']}&b={acap['id']}")
+    print("\n=== compare plain-course music vs bob analysis ===")
+    c = cmp["comparison"]
+    print(f"  comparable={c['comparable']}  score delta "
+          f"{c['total_score_delta']:+}  hits delta {c['total_hits_delta']:+}")
+    for r in c["rules"]:
+        print(f"  {r['name']:<26} {r['a']['score']:>3} -> {r['b']['score']:>3}"
+              f"  ({r['score_delta']:+})")
+
+    # 22. touch scoring with a segment-restricted rule
+    tscheme = call("POST", "/api/schemes", {
+        "name": "touch-music", "stage": 6, "rules": [
+            {"id": "runs", "name": "four-runs anywhere", "kind": "run",
+             "direction": "both", "position": "any", "min_length": 4},
+            {"id": "seg2", "name": "segment 2 only", "kind": "run",
+             "direction": "both", "position": "any", "min_length": 4,
+             "segments": [2]}]})
+    tmu = call("POST", "/api/music",
+               {"touch_id": t1["id"], "scheme_id": tscheme["id"]})
+    seg_hits = call("GET", f"/api/music/{tmu['id']}/hits?segment=2")
+    show("touch music (segment-restricted rules stay zero elsewhere)",
+         {"total_hits": tmu["total_hits"], "total_score": tmu["total_score"],
+          "rule_scores": tmu["rule_scores"],
+          "segment_2_hits": seg_hits["matched"]})
+
+    # 23. a scheme-version mismatch is refused as incomparable
+    scheme2 = call("POST", "/api/schemes", {
+        "name": "minor-music", "stage": 6, "rules": [
+            {"name": "rounds only", "kind": "row", "row": "123456"}]})
+    mu_v2 = call("POST", "/api/music",
+                 {"analysis_id": a1["id"], "scheme_id": scheme2["id"]})
+    try:
+        call("GET", f"/api/music/compare?a={mu['id']}&b={mu_v2['id']}")
+    except urllib.error.HTTPError as e:
+        show("compare across scheme versions refused (incomparable)",
+             json.loads(e.read().decode()), ["code", "reasons"])
+
+    # 24. download the music result as a self-contained JSON
+    req = urllib.request.Request(BASE + f"/api/music/{mu['id']}/download")
+    with urllib.request.urlopen(req) as resp:
+        payload = resp.read()
+        fname = resp.headers["Content-Disposition"].split("filename=")[-1].strip('"')
+    with open(fname, "wb") as fh:
+        fh.write(payload)
+    print(f"\ndownloaded music result -> {fname} ({len(payload)} bytes)")
+
 
 if __name__ == "__main__":
     main()
